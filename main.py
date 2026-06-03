@@ -8,7 +8,7 @@ from typing import List, Dict, Optional
 
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.message_components import Image, File
+from astrbot.api.message_components import File
 from astrbot.api import logger
 from .lib.client import OpenlistClient
 from .lib.config import (
@@ -34,7 +34,6 @@ class OpenlistPlugin(Star):
         self.global_config_manager = GlobalConfigManager("openlist")
         self.cache_manager = CacheManager("openlist")
         self.user_navigation_state = {}
-        self.user_upload_state = {}
         self.upload_service = UploadService(self)
         self.download_service = DownloadService(self)
         self.backup_service = BackupService(self)
@@ -108,18 +107,6 @@ class OpenlistPlugin(Star):
             logger.warning(f"配置 {key} 的值不能为负数: {value}，已使用默认值 {default}MB")
             return default
         return value
-
-    def _get_upload_mode_timeout_minutes(self, user_config: Dict) -> int:
-        """读取上传模式持续时间，单位分钟。"""
-        try:
-            timeout = int(user_config.get("upload_mode_timeout", 10))
-        except (TypeError, ValueError):
-            logger.warning(f"配置 upload_mode_timeout 的值无效: {user_config.get('upload_mode_timeout')!r}，已使用默认值 10 分钟")
-            return 10
-        if timeout < 1:
-            logger.warning(f"配置 upload_mode_timeout 的值过小: {timeout}，已使用默认值 10 分钟")
-            return 10
-        return timeout
 
     def _get_cache_duration_seconds(self, user_config: Dict) -> int:
         """读取缓存有效期，单位秒。"""
@@ -273,6 +260,62 @@ class OpenlistPlugin(Star):
         except Exception:
             return default
 
+    def _get_event_group_id(self, event: AstrMessageEvent):
+        """从 AstrBot 事件或平台原始事件中读取群号。"""
+        message_obj = getattr(event, "message_obj", None)
+        group_id = getattr(message_obj, "group_id", None)
+        if group_id not in (None, ""):
+            return group_id
+
+        raw_message = self._read_value(message_obj, "raw_message")
+        return self._read_value(raw_message, "group_id")
+
+    def _get_navigation_state_key(self, event: AstrMessageEvent) -> str:
+        """按会话隔离导航状态，避免同一用户在不同群/私聊串列表序号。"""
+        user_id = event.get_sender_id()
+        group_id = self._get_event_group_id(event)
+        if group_id not in (None, ""):
+            return f"group:{group_id}:user:{user_id}"
+        return f"private:user:{user_id}"
+
+    async def _get_group_member_role(self, event: AstrMessageEvent, group_id, user_id=None):
+        """通过 OneBot 查询指定用户在目标群的角色。"""
+        user_id = user_id or event.get_sender_id()
+        try:
+            member_info = await event.bot.api.call_action(
+                "get_group_member_info",
+                group_id=int(group_id),
+                user_id=int(user_id),
+                no_cache=True,
+            )
+        except Exception as e:
+            logger.warning(f"查询目标群成员权限失败: group={group_id}, user={user_id}, err={e}")
+            return None
+
+        if not isinstance(member_info, dict):
+            return None
+        return member_info.get("role") or member_info.get("permission")
+
+    async def _has_target_group_permission(self, event: AstrMessageEvent, group_id) -> bool:
+        """允许当前群直接操作；跨群/私聊指定群时要求目标群群主或管理员。"""
+        current_group_id = self._get_event_group_id(event)
+        if current_group_id not in (None, "") and str(current_group_id) == str(group_id):
+            return True
+
+        role = await self._get_group_member_role(event, group_id)
+        return self._is_admin_role(role)
+
+    async def _deny_if_no_target_group_permission(self, event: AstrMessageEvent, group_id, action_name: str) -> bool:
+        """返回 True 表示权限不足并已记录日志。"""
+        if await self._has_target_group_permission(event, group_id):
+            return False
+
+        logger.warning(
+            f"{action_name}目标群权限不足: user={event.get_sender_id()}, "
+            f"current_group={self._get_event_group_id(event)}, target_group={group_id}"
+        )
+        return True
+
     def _extract_sender_role(self, event: AstrMessageEvent):
         """尽量从 AstrBot 事件和平台原始事件中提取发送者群角色。"""
         candidates = []
@@ -398,15 +441,6 @@ class OpenlistPlugin(Star):
             return items[number - 1]
         return None
 
-    def _get_upload_state_key(self, event: AstrMessageEvent) -> str:
-        """按会话隔离上传模式，避免同一用户在不同群聊间串状态。"""
-        user_id = event.get_sender_id()
-        message_obj = getattr(event, "message_obj", None)
-        group_id = getattr(message_obj, "group_id", None)
-        if group_id:
-            return f"group:{group_id}:user:{user_id}"
-        return f"private:user:{user_id}"
-
     def _get_backup_retry_key(self, event: AstrMessageEvent) -> str:
         """按会话和用户定位最近一次手动备份失败项。"""
         user_id = event.get_sender_id()
@@ -523,46 +557,6 @@ class OpenlistPlugin(Star):
         if not isinstance(current_path, str) or not current_path.startswith("/"):
             current_path = "/"
         return self._normalize_openlist_path(f"{current_path.rstrip('/')}/{item_name}")
-
-    def _is_regular_message_event(self, event: AstrMessageEvent) -> bool:
-        """过滤 notice、回调等非普通消息事件，避免上传模式误响应。"""
-        message_obj = getattr(event, "message_obj", None)
-        raw_event_data = getattr(message_obj, "raw_message", None)
-        if isinstance(raw_event_data, dict):
-            post_type = raw_event_data.get("post_type")
-            if post_type is not None and post_type != "message":
-                return False
-            message_type = raw_event_data.get("message_type")
-            if message_type is not None and message_type not in ("group", "private"):
-                return False
-            self_id = raw_event_data.get("self_id")
-            sender_id = raw_event_data.get("user_id")
-            if self_id is not None and sender_id is not None and str(self_id) == str(sender_id):
-                return False
-
-        self_id = getattr(message_obj, "self_id", None)
-        sender = getattr(message_obj, "sender", None)
-        sender_id = getattr(sender, "user_id", None) if sender else None
-        if self_id is not None and sender_id is not None and str(self_id) == str(sender_id):
-            return False
-
-        astr_message_type = getattr(message_obj, "type", None)
-        if astr_message_type is None:
-            return True
-        type_name = getattr(astr_message_type, "name", str(astr_message_type))
-        return type_name in ("GROUP_MESSAGE", "PRIVATE_MESSAGE") or str(astr_message_type).endswith((".GROUP_MESSAGE", ".PRIVATE_MESSAGE"))
-
-    def _get_user_upload_state(self, state_key: str) -> Dict:
-        """获取用户上传状态"""
-        if state_key not in self.user_upload_state:
-            self.user_upload_state[state_key] = {"waiting": False, "target_path": "/"}
-        return self.user_upload_state[state_key]
-
-    def _set_user_upload_waiting(self, state_key: str, waiting: bool, target_path: str = "/"):
-        """设置用户上传等待状态"""
-        upload_state = self._get_user_upload_state(state_key)
-        upload_state["waiting"] = waiting
-        upload_state["target_path"] = target_path
 
     def _format_file_size(self, size: int) -> str:
         """格式化文件大小"""
@@ -781,11 +775,6 @@ class OpenlistPlugin(Star):
         """处理群文件上传事件（自动备份）"""
         return await self.backup_service.handle_group_file_upload(event)
 
-
-    async def _upload_file(self, event: AstrMessageEvent, file_component: File, user_config: Dict):
-        async for result in self.upload_service._upload_file(event, file_component, user_config):
-            yield result
-
     async def _get_group_files_recursive(self, bot, group_id: int, folder_id: str = "/", current_path: str = "") -> List[Dict]:
         """递归获取群文件列表"""
         return await self.backup_service._get_group_files_recursive(bot, group_id, folder_id, current_path)
@@ -829,12 +818,6 @@ class OpenlistPlugin(Star):
         """核心备份逻辑，支持手动和自动备份"""
         async for result in self.backup_service._do_backup_logic(bot, event, group_id, target_path, user_config, is_auto, items_override, retry_key, is_retry):
             yield result
-
-    async def _upload_image(self, event: AstrMessageEvent, image_component: Image, user_config: Dict):
-        """上传图片到Openlist"""
-        async for result in self.upload_service._upload_image(event, image_component, user_config):
-            yield result
-
     @filter.command_group("ol", alias=["网盘"])
     def openlist_group(self):
         """Openlist文件管理命令组"""
@@ -890,14 +873,8 @@ class OpenlistPlugin(Star):
 
     @openlist_group.command("upload", alias=["上传"])
     async def upload_command(self, event: AstrMessageEvent, target: str = ""):
-        """上传文件命令"""
+        """上传引用消息中的文件、图片或视频"""
         async for result in self.upload_service.upload_command(event, target):
-            yield result
-
-    @filter.event_message_type(filter.EventMessageType.ALL)
-    async def handle_file_message(self, event: AstrMessageEvent):
-        """处理文件消息"""
-        async for result in self.upload_service.handle_file_message(event):
             yield result
 
     @openlist_group.command("backup", alias=["备份"])

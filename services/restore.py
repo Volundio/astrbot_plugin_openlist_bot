@@ -16,6 +16,7 @@ class RestoreService(PluginService):
 
     async def restore_command(self, event: AstrMessageEvent, path: str, target: str = None):
         """将 Openlist 路径中的文件恢复到群组或私聊"""
+        path = self._normalize_openlist_path(path)
         user_id = event.get_sender_id()
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
@@ -37,10 +38,15 @@ class RestoreService(PluginService):
 
         # 如果未指定群号，尝试获取当前会话群号
         if not target_group_id:
-            if event.message_obj.group_id:
-                target_group_id = int(event.message_obj.group_id)
+            event_group_id = self._get_event_group_id(event)
+            if event_group_id:
+                target_group_id = int(event_group_id)
 
         is_group = target_group_id is not None
+        if is_group and await self._deny_if_no_target_group_permission(event, target_group_id, "恢复文件"):
+            yield event.plain_result("❌ 权限不足：只能恢复到当前群，或由目标群群主/管理员指定 @群号。")
+            return
+
         target_desc = f"群 {target_group_id}" if is_group else "私聊会话"
 
         yield event.plain_result(f"🚀 正在启动恢复任务...\n📂 来源路径: {path}\n🎯 目标: {target_desc}")
@@ -49,19 +55,19 @@ class RestoreService(PluginService):
             async with self._create_openlist_client(user_config) as client:
                 # 递归搜集文件
                 files_to_restore = []
-                base_path = path.rstrip('/')
+                base_path = self._normalize_openlist_path(path)
 
                 async def collect(current_path):
                     res = await client.list_files(current_path, per_page=0)
                     if not res: return
                     for item in res.get("content", []):
-                        full_item_path = f"{current_path.rstrip('/')}/{item['name']}"
+                        full_item_path = self._normalize_openlist_path(f"{current_path.rstrip('/')}/{item['name']}")
                         if item.get("is_dir"):
                             await collect(full_item_path)
                         else:
                             item["full_path"] = full_item_path
                             # 计算相对于基础路径的相对路径
-                            rel = full_item_path[len(base_path):].lstrip('/')
+                            rel = full_item_path.lstrip("/") if base_path == "/" else full_item_path[len(base_path):].lstrip("/")
                             item["relative_path"] = rel
                             files_to_restore.append(item)
 

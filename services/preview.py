@@ -20,6 +20,7 @@ class PreviewService(PluginService):
             yield event.plain_result("❌ 请提供文件路径或序号")
             return
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
 
         # 检查配置
@@ -38,17 +39,17 @@ class PreviewService(PluginService):
         path_candidates = []
         if path_or_num.isdigit():
             number = int(path_or_num)
-            item = self._get_item_by_number(user_id, number)
+            item = self._get_item_by_number(nav_key, number)
             if item:
                 if item.get("is_dir"):
                     yield event.plain_result("❌ 无法预览目录，请指定一个文件。")
                     return
-                full_path = self._get_item_full_path(user_id, item, user_config)
+                full_path = self._get_item_full_path(nav_key, item, user_config)
             else:
                 yield event.plain_result(f"❌ 序号 {number} 无效")
                 return
         else:
-            path_candidates = self._resolve_path_candidates(user_id, path_or_num)
+            path_candidates = self._resolve_path_candidates(nav_key, path_or_num)
             full_path = path_candidates[0]
 
         try:

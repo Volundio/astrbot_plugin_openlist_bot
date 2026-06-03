@@ -63,18 +63,18 @@ class HelpService(PluginService):
      - 示例: `/ol rm 4`
      - 示例: `/ol rm /tmp/old_file.txt`
 
-📤 `/ol upload [路径|cancel]`
-   - `/ol upload`: 在当前目录开启上传模式。
-   - `/ol upload /目标目录`: 在指定目录开启上传模式。
-   - `/ol upload 子目录`: 在当前目录下的子目录开启上传模式。
-   - `/ol upload cancel`: 取消上传。
-   - `使用`: 开启后，直接向机器人发送文件或图片即可。
+📤 `/ol upload [路径]`
+   - 回复一条包含图片、视频或文件的消息后发送本指令，即可上传被引用内容。
+   - `/ol upload`: 上传到当前目录。
+   - `/ol upload /目标目录`: 上传到指定目录。
+   - `/ol upload 子目录`: 上传到当前目录下的子目录。
 
 📦 `/ol backup [/目标路径] [@群号]`
    - 将指定群聊的所有文件递归备份到 Openlist。
    - 示例: `/ol backup /群备份 @123456`
    - 重试失败项: `/ol backup retry`
    - 提示: 路径须以 `/` 开头，群号须以 `@` 开头。未指定路径时使用 `backup_default_path`。
+   - 权限: 当前群可直接操作；指定其他群时需要您是目标群群主或管理员。
 
 🔄 `/ol autobackup <enable|disable> [@群号] [/路径]`
    - 配置群文件自动备份（新上传文件自动同步）。
@@ -88,6 +88,7 @@ class HelpService(PluginService):
    - 示例: `/ol restore /backup/group_123456` (恢复到当前会话)
    - 示例: `/ol restore /docs @987654` (恢复到指定群)
    - 提示: 目标为群组时会尝试保持一级目录结构。
+   - 权限: 当前群可直接操作；指定其他群时需要您是目标群群主或管理员。
 
 ---
 插件配置指令

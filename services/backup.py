@@ -13,6 +13,14 @@ from .base import PluginService
 class BackupService(PluginService):
     """Backup service."""
 
+    def _to_int_or_none(self, value):
+        if value in (None, ""):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
     async def _run_group_file_autobackup(
         self,
         event: AstrMessageEvent,
@@ -254,6 +262,10 @@ class BackupService(PluginService):
         group_id = retry_state["group_id"]
         target_path = retry_state["target_path"]
         failed_items = retry_state["items"]
+        if await self._deny_if_no_target_group_permission(event, group_id, "备份重试"):
+            yield event.plain_result("❌ 权限不足：只能重试当前群备份，或由目标群群主/管理员重试指定群备份。")
+            return
+
         self._delete_backup_retry_state(retry_key)
         yield event.plain_result(
             f"🔁 开始重试上次备份失败的 {len(failed_items)} 个文件\n"
@@ -359,14 +371,14 @@ class BackupService(PluginService):
             filtered_items = []
             for item in all_items:
                 name = item.get("file_name", "").lower()
-                size = item.get("file_size", 0)
+                size = self._to_int_or_none(item.get("file_size"))
 
                 if allowed_exts:
                     ext = os.path.splitext(name)[1]
                     if ext not in allowed_exts:
                         continue
 
-                if max_size > 0 and size > max_size:
+                if max_size > 0 and size is not None and size > max_size:
                     continue
 
                 filtered_items.append(item)
@@ -442,7 +454,7 @@ class BackupService(PluginService):
                 async with semaphore:
                     file_id = item.get("file_id")
                     file_name = item.get("file_name")
-                    rel_path = item.get("relative_path")
+                    rel_path = item.get("relative_path") or file_name or ""
                     file_dir = os.path.dirname(rel_path)
                     target_dir = f"{target_path.rstrip('/')}/{file_dir}".rstrip("/")
 
@@ -554,11 +566,16 @@ class BackupService(PluginService):
 
         # 2. 确定群号 (手动指定优先，否则用当前群)
         if not target_group_id:
-            if event.message_obj.group_id:
-                target_group_id = int(event.message_obj.group_id)
+            event_group_id = self._get_event_group_id(event)
+            if event_group_id:
+                target_group_id = int(event_group_id)
             else:
                 yield event.plain_result("❌ 请指定群号（以 @ 开头）或在群聊中使用。")
                 return
+
+        if await self._deny_if_no_target_group_permission(event, target_group_id, "手动备份"):
+            yield event.plain_result("❌ 权限不足：只能备份当前群，或由目标群群主/管理员指定 @群号。")
+            return
 
         target_path = self._render_backup_path(
             target_path_arg or user_config.get("backup_default_path", "/backup/group_{group_id}"),
@@ -627,11 +644,16 @@ class BackupService(PluginService):
 
         # 2. 确定群号 (手动指定优先，否则用当前群)
         if not target_gid:
-            if event.message_obj.group_id:
-                target_gid = str(event.message_obj.group_id)
+            event_group_id = self._get_event_group_id(event)
+            if event_group_id:
+                target_gid = str(event_group_id)
             else:
                 yield event.plain_result("❌ 请指定群号（以 @ 开头）或在群聊中使用。")
                 return
+
+        if await self._deny_if_no_target_group_permission(event, target_gid, "自动备份配置"):
+            yield event.plain_result("❌ 权限不足：只能配置当前群，或由目标群群主/管理员指定 @群号。")
+            return
 
         local_cfg = self.global_config_manager.load_config()
         groups = local_cfg.get("autobackup_groups", [])

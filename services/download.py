@@ -18,6 +18,7 @@ class DownloadService(PluginService):
     async def _download_file(self, event: AstrMessageEvent, file_item: Dict, user_config: Dict, full_path_override: str = None):
         """下载文件并作为附件发送给用户"""
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         file_name = file_item.get("name", "")
         file_size = file_item.get("size", 0)
         file_path = full_path_override or ""
@@ -39,7 +40,7 @@ class DownloadService(PluginService):
             if full_path_override:
                 file_path = full_path_override
             else:
-                file_path = self._get_item_full_path(user_id, file_item, user_config)
+                file_path = self._get_item_full_path(nav_key, file_item, user_config)
 
             async with self._create_openlist_client(user_config) as client:
                 link = await client.get_direct_download_link(file_path)
@@ -116,13 +117,14 @@ class DownloadService(PluginService):
     async def _get_and_send_download_link(self, event: AstrMessageEvent, item: Dict, user_config: Dict, full_path: str = None):
         """获取指定项目的文件链接并发送"""
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         yield event.plain_result(f"🔗 正在获取文件链接: {item.get('name', '')}...")
 
         # 如果提供了 full_path，则直接使用；否则，根据 item 信息构建路径
         if full_path:
             file_path = full_path
         else:
-            file_path = self._get_item_full_path(user_id, item, user_config)
+            file_path = self._get_item_full_path(nav_key, item, user_config)
 
         file_name = item.get("name", "")
         if not self._is_extension_allowed(file_name, user_config):

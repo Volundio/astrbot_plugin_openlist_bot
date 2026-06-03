@@ -12,19 +12,20 @@ class BrowseService(PluginService):
     async def list_files(self, event: AstrMessageEvent, path: str = ""):
         """列出文件和目录，或获取文件链接"""
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
             return
         path = (path or "").strip()
-        target_path = self._resolve_target_path(user_id, path)
+        target_path = self._resolve_target_path(nav_key, path)
         path_candidates = [target_path]
         if path.isdigit():
             number = int(path)
-            item = self._get_item_by_number(user_id, number)
+            item = self._get_item_by_number(nav_key, number)
             if item:
                 if item.get("is_dir", False):
-                    target_path = self._get_item_full_path(user_id, item, user_config)
+                    target_path = self._get_item_full_path(nav_key, item, user_config)
                     path_candidates = [target_path]
                 else:
                     async for result in self._get_and_send_download_link(event, item, user_config):
@@ -34,7 +35,7 @@ class BrowseService(PluginService):
                 yield event.plain_result(f"❌ 序号 {number} 无效，请使用 /ol ls 查看当前目录")
                 return
         else:
-            path_candidates = self._resolve_path_candidates(user_id, path)
+            path_candidates = self._resolve_path_candidates(nav_key, path)
         try:
             cache_enabled = str(user_config.get("enable_cache", True)).lower() not in ("false", "0", "no", "off")
             cache_duration = self._get_cache_duration_seconds(user_config)
@@ -65,8 +66,8 @@ class BrowseService(PluginService):
                             )
                     if list_result is not None:
                         files = list_result.get("content") or []
-                        self._update_user_navigation_state(user_id, candidate_path, files)
-                        formatted_list = self._format_file_list(files, candidate_path, user_config, user_id)
+                        self._update_user_navigation_state(nav_key, candidate_path, files)
+                        formatted_list = self._format_file_list(files, candidate_path, user_config, nav_key)
                         yield event.plain_result(formatted_list)
                         return
 
@@ -80,8 +81,9 @@ class BrowseService(PluginService):
     async def next_page(self, event: AstrMessageEvent):
         """下一页"""
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
-        nav_state = self._get_user_navigation_state(user_id)
+        nav_state = self._get_user_navigation_state(nav_key)
         if not nav_state.get("items"):
             yield event.plain_result("🤔 没有可供翻页的列表，请先使用 /ol ls 查看一个目录。")
             return
@@ -97,15 +99,16 @@ class BrowseService(PluginService):
             return
 
         formatted_list = self._format_file_list(
-            all_items, nav_state["current_path"], user_config, user_id
+            all_items, nav_state["current_path"], user_config, nav_key
         )
         yield event.plain_result(formatted_list)
 
     async def prev_page(self, event: AstrMessageEvent):
         """上一页"""
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
-        nav_state = self._get_user_navigation_state(user_id)
+        nav_state = self._get_user_navigation_state(nav_key)
         if not nav_state.get("items"):
             yield event.plain_result("🤔 没有可供翻页的列表，请先使用 /ol ls 查看一个目录。")
             return
@@ -121,7 +124,7 @@ class BrowseService(PluginService):
             return
 
         formatted_list = self._format_file_list(
-            all_items, nav_state["current_path"], user_config, user_id
+            all_items, nav_state["current_path"], user_config, nav_key
         )
         yield event.plain_result(formatted_list)
 
@@ -131,7 +134,8 @@ class BrowseService(PluginService):
             yield event.plain_result("❌ 请提供搜索关键词")
             return
         user_id = event.get_sender_id()
-        path = self._resolve_target_path(user_id, path)
+        nav_key = self._get_navigation_state_key(event)
+        path = self._resolve_target_path(nav_key, path)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
@@ -142,10 +146,10 @@ class BrowseService(PluginService):
                 files = await client.search_files(keyword, path)
                 if files:
                     search_title = f'🔍 搜索 "{keyword}"'
-                    self._update_user_navigation_state(user_id, search_title, files)
+                    self._update_user_navigation_state(nav_key, search_title, files)
 
                     # 使用通用的列表格式化函数显示第一页
-                    formatted_list = self._format_file_list(files, search_title, user_config, user_id)
+                    formatted_list = self._format_file_list(files, search_title, user_config, nav_key)
                     yield event.plain_result(formatted_list)
                 else:
                     yield event.plain_result(f"🔍 未找到包含 '{keyword}' 的文件")
@@ -160,11 +164,12 @@ class BrowseService(PluginService):
             yield event.plain_result("❌ 请提供文件路径")
             return
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
             return
-        path_candidates = self._resolve_path_candidates(user_id, path)
+        path_candidates = self._resolve_path_candidates(nav_key, path)
         target_path = path_candidates[0]
         try:
             async with self._create_openlist_client(user_config) as client:
@@ -214,6 +219,7 @@ class BrowseService(PluginService):
             yield event.plain_result("❌ 请提供文件路径或序号")
             return
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
@@ -224,7 +230,7 @@ class BrowseService(PluginService):
 
         if path.isdigit():
             number = int(path)
-            item = self._get_item_by_number(user_id, number)
+            item = self._get_item_by_number(nav_key, number)
             if item:
                 if item.get("is_dir", False):
                     yield event.plain_result(f"❌ 序号 {number} 是目录，无法下载。")
@@ -234,7 +240,7 @@ class BrowseService(PluginService):
                 yield event.plain_result(f"❌ 序号 {number} 无效。")
                 return
         else:
-            path_candidates = self._resolve_path_candidates(user_id, path)
+            path_candidates = self._resolve_path_candidates(nav_key, path)
             try:
                 async with self._create_openlist_client(user_config) as client:
                     for candidate_path in path_candidates:
@@ -260,11 +266,12 @@ class BrowseService(PluginService):
     async def quit_navigation(self, event: AstrMessageEvent):
         """返回上级目录"""
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
             return
-        nav_state = self._get_user_navigation_state(user_id)
+        nav_state = self._get_user_navigation_state(nav_key)
         if not nav_state["parent_paths"]:
             yield event.plain_result("📂 已经在根目录，无法继续回退。")
             return
@@ -276,7 +283,7 @@ class BrowseService(PluginService):
                     files = result.get("content") or []
                     nav_state["current_path"] = previous_path
                     nav_state["items"] = files
-                    formatted_list = self._format_file_list(files, previous_path, user_config, user_id)
+                    formatted_list = self._format_file_list(files, previous_path, user_config, nav_key)
                     yield event.plain_result(f"⬅️ 已返回上级目录\n\n{formatted_list}")
                 else:
                     logger.warning(f"用户 {user_id} 无法访问上级目录: {previous_path}")
@@ -292,6 +299,7 @@ class BrowseService(PluginService):
             yield event.plain_result("❌ 请提供文件路径或序号")
             return
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
@@ -303,9 +311,9 @@ class BrowseService(PluginService):
 
         if path.isdigit():
             number = int(path)
-            item = self._get_item_by_number(user_id, number)
+            item = self._get_item_by_number(nav_key, number)
             if item:
-                full_path = self._get_item_full_path(user_id, item, user_config)
+                full_path = self._get_item_full_path(nav_key, item, user_config)
                 if full_path == "/":
                     yield event.plain_result("❌ 不允许删除根目录。")
                     return
@@ -316,7 +324,7 @@ class BrowseService(PluginService):
                 yield event.plain_result(f"❌ 序号 {number} 无效。")
                 return
         else:
-            full_path = self._resolve_target_path(user_id, path)
+            full_path = self._resolve_target_path(nav_key, path)
             if full_path == "/":
                 yield event.plain_result("❌ 不允许删除根目录。")
                 return
@@ -332,7 +340,7 @@ class BrowseService(PluginService):
                     self.cache_manager.clear_cache(user_id)
 
                     # 检查是否删除了当前路径或其父目录
-                    nav_state = self._get_user_navigation_state(user_id)
+                    nav_state = self._get_user_navigation_state(nav_key)
                     current_path = nav_state["current_path"]
 
                     # 构建被删除项目的完整路径列表
@@ -354,7 +362,7 @@ class BrowseService(PluginService):
                         result = await client.list_files("/")
                         if result is not None:
                             files = result.get("content") or []
-                            self.user_navigation_state[user_id] = {
+                            self.user_navigation_state[nav_key] = {
                                 "current_path": "/",
                                 "items": files,
                                 "parent_paths": [],
@@ -366,7 +374,7 @@ class BrowseService(PluginService):
                         result = await client.list_files(current_path)
                         if result is not None:
                             files = result.get("content") or []
-                            self._update_user_navigation_state(user_id, current_path, files)
+                            self._update_user_navigation_state(nav_key, current_path, files)
                 else:
                     yield event.plain_result(f"❌ 删除失败，请检查权限或路径是否正确")
         except Exception as e:
@@ -380,12 +388,13 @@ class BrowseService(PluginService):
             yield event.plain_result("❌ 请提供文件夹名称或路径")
             return
         user_id = event.get_sender_id()
+        nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
             return
 
-        full_path = self._resolve_target_path(user_id, name)
+        full_path = self._resolve_target_path(nav_key, name)
         if full_path == "/":
             yield event.plain_result("❌ 不允许创建根目录。")
             return
@@ -397,7 +406,7 @@ class BrowseService(PluginService):
                     yield event.plain_result(f"✅ 已创建文件夹: {name}")
                     self.cache_manager.clear_cache(user_id)
                     # 如果在当前目录下创建，刷新列表
-                    nav_state = self._get_user_navigation_state(user_id)
+                    nav_state = self._get_user_navigation_state(nav_key)
                     current_path = self._normalize_openlist_path(nav_state["current_path"])
                     # 检查创建的文件夹是否在当前目录下（直接子目录）
                     parent_path = posixpath.dirname(full_path) or "/"
@@ -405,7 +414,7 @@ class BrowseService(PluginService):
                         result = await client.list_files(current_path)
                         if result:
                             files = result.get("content") or []
-                            self._update_user_navigation_state(user_id, current_path, files)
+                            self._update_user_navigation_state(nav_key, current_path, files)
                 else:
                     yield event.plain_result(f"❌ 创建文件夹失败")
         except Exception as e:
