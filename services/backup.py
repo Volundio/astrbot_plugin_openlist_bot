@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import File
+from astrbot.api.star import StarTools
 
 from .base import PluginService
 
@@ -51,15 +52,19 @@ class BackupService(PluginService):
     def _backup_item_lock_key(self, target_path: str, item: Dict) -> str:
         return self._backup_item_target(target_path, item, use_override=False)[2]
 
+    def _backup_item_duplicate_key(self, target_path: str, item: Dict) -> tuple:
+        target_dir, file_name, _ = self._backup_item_target(target_path, item, use_override=False)
+        return target_dir, file_name
+
     def _backup_item_identity(self, target_path: str, item: Dict) -> tuple:
-        target_key = self._backup_item_lock_key(target_path, item)
+        duplicate_key = self._backup_item_duplicate_key(target_path, item)
         size = self._backup_item_size(item)
         if size is not None:
-            return ("target_size", target_key, size)
+            return ("target_size", duplicate_key, size)
         file_id = item.get("file_id")
         if file_id:
-            return ("file_id", target_key, str(file_id))
-        return ("target_unknown_size", target_key)
+            return ("file_id", duplicate_key, str(file_id))
+        return ("target_unknown_size", duplicate_key)
 
     def _safe_suffix_part(self, value: str) -> str:
         suffix = "".join(c for c in str(value or "") if c.isalnum() or c in "-_").strip("-_")
@@ -83,26 +88,27 @@ class BackupService(PluginService):
         seen_items = set()
         target_counts = {}
         for item in items:
-            _, file_name, target_key = self._backup_item_target(target_path, item, use_override=False)
+            target_dir, file_name = self._backup_item_duplicate_key(target_path, item)
             if not file_name:
                 continue
-            identity = (target_key, self._backup_item_identity(target_path, item))
+            duplicate_key = (target_dir, file_name)
+            identity = (duplicate_key, self._backup_item_identity(target_path, item))
             if identity in seen_items:
-                logger.info(f"⏭️ [群备份] 跳过重复群文件记录: {target_key}")
+                logger.info(f"⏭️ [群备份] 跳过同目录重复群文件记录: {target_dir}/{file_name}")
                 continue
             seen_items.add(identity)
-            target_counts[target_key] = target_counts.get(target_key, 0) + 1
-            candidates.append((target_key, item))
+            target_counts[duplicate_key] = target_counts.get(duplicate_key, 0) + 1
+            candidates.append((duplicate_key, item))
 
         deduped = []
         used_names = {}
-        for target_key, item in candidates:
-            if target_counts.get(target_key, 0) <= 1:
+        for duplicate_key, item in candidates:
+            if target_counts.get(duplicate_key, 0) <= 1:
                 deduped.append(item)
                 continue
 
             _, file_name, _ = self._backup_item_target(target_path, item, use_override=False)
-            used_for_target = used_names.setdefault(target_key, set())
+            used_for_target = used_names.setdefault(duplicate_key, set())
             if not used_for_target:
                 used_for_target.add(file_name)
                 deduped.append(item)
@@ -512,6 +518,7 @@ class BackupService(PluginService):
         file_id = item.get("file_id")
         file_name = item.get("_backup_target_name") or item.get("file_name")
         busid = item.get("busid", 0)
+        temp_file_path = None
         upload_size = item.get("file_size")
         try:
             upload_size = int(upload_size) if upload_size is not None else None
@@ -552,6 +559,65 @@ class BackupService(PluginService):
 
             if attempt < attempts:
                 await asyncio.sleep(max(0, retry_delay))
+
+        if skip_existing and await self._openlist_file_matches(client, target_dir, file_name, upload_size):
+            logger.info(f"⏭️ [群备份] 目标文件已存在，跳过本地临时文件备用上传: {target_dir}/{file_name}")
+            return True, ""
+
+        if not file_id:
+            return False, reason
+
+        try:
+            logger.info(
+                f"🧰 [群备份] URL 流式中转 {attempts} 次失败，改用本地临时文件备用上传: "
+                f"{file_name}, target={target_dir}"
+            )
+            url_res = await bot.api.call_action(
+                "get_group_file_url",
+                group_id=group_id,
+                file_id=file_id,
+                busid=busid,
+            )
+            fallback_url = url_res.get("url") if isinstance(url_res, dict) else None
+            if not fallback_url:
+                return False, "备用上传无法获取群文件下载 URL"
+
+            temp_dir = os.path.join(StarTools.get_data_dir("openlist"), "backup_temp")
+            os.makedirs(temp_dir, exist_ok=True)
+            safe_filename = self._sanitize_filename(file_name, "backup")
+            temp_file_path = os.path.join(temp_dir, f"backup_{group_id}_{self._unique_suffix()}_{safe_filename}")
+
+            if not await client.download_url_to_file(fallback_url, temp_file_path, file_name, upload_size):
+                return False, "备用上传本地下载失败"
+
+            actual_size = os.path.getsize(temp_file_path)
+            if upload_size is not None and upload_size > 0 and actual_size != upload_size:
+                logger.error(
+                    f"备用上传本地文件大小不一致: {file_name}, actual={actual_size}, expected={upload_size}"
+                )
+                return False, "备用上传本地文件大小不一致"
+
+            if skip_existing and await self._openlist_file_matches(client, target_dir, file_name, upload_size):
+                logger.info(f"⏭️ [群备份] 目标文件已存在，跳过本地临时文件备用上传: {target_dir}/{file_name}")
+                return True, ""
+
+            if await client.upload_file(temp_file_path, target_dir, file_name):
+                logger.info(f"✅ [群备份] 本地临时文件备用上传成功: {file_name} -> {target_dir}")
+                return True, ""
+            return False, "备用上传 OpenList 上传失败"
+        except Exception as e:
+            logger.error(f"备用上传文件 {file_name} 失败: {e}", exc_info=True)
+            return False, str(e)
+        finally:
+            cleanup_paths = []
+            if temp_file_path:
+                cleanup_paths.extend([temp_file_path, f"{temp_file_path}.part"])
+            for cleanup_path in cleanup_paths:
+                if cleanup_path and os.path.exists(cleanup_path):
+                    try:
+                        os.remove(cleanup_path)
+                    except OSError as e:
+                        logger.warning(f"清理备份备用上传临时文件失败: {cleanup_path}, err={e}")
 
         return False, reason
 

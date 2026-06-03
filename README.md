@@ -147,8 +147,8 @@ ol config set debug_transfer_logging true
 # 设置手动备份默认目录（支持 {group_id} 占位符）
 ol config set backup_default_path /backup/group_{group_id}
 
-# 备份时跳过目标目录内同名且大小一致的文件（默认开启）
-# 同名但大小不同的文件会自动改名备份，避免覆盖
+# 备份时跳过同目录内同名且大小一致的文件（默认开启）
+# 同目录同名但大小不同的文件会自动改名备份，避免覆盖
 ol config set backup_skip_existing true
 
 # 设置备份单文件重试：总尝试次数 3，每次间隔 5 秒
@@ -306,8 +306,9 @@ ol restore /backup/folder
 * `ol backup` 未指定路径时使用 `backup_default_path`。
 * `ol backup` 支持 `@群号` 和 `/目标路径` 两个参数，顺序不限。
 * `backup_default_path`、`autobackup_default_path` 支持 `{group_id}`、`{gid}`、`{group}` 占位符。
-* 备份默认会跳过目标目录中同名且大小一致的文件。
-* 同名但大小不同的文件会自动改名备份，避免覆盖。例如 `file.mp4` 会保存为 `file [文件标识].mp4`。
+* 备份默认只会跳过同目录中同名且大小一致的文件，不会跨目录检查重复文件。
+* 同目录同名但大小不同的文件会自动改名备份，避免覆盖。例如 `file.mp4` 会保存为 `file [文件标识].mp4`。
+* 群文件 URL 流式中转多次失败后，会改用本地临时文件备用上传：先完整下载到 `backup_temp`，校验大小后再上传；无论成功或失败，都会清理临时文件。
 * 备份失败项会保存到临时失败清单，使用 `ol backup retry` 可只重试失败项。
 * `ol autobackup enable` 开启自动备份后，会立即执行一次全量备份。
 * `ol autobackup cancel [@群号]` 可中途取消 `enable` 触发的首次全量备份。
@@ -341,6 +342,7 @@ data/plugins_data/openlist/
 │   └── ...
 ├── links/                      # 下载链接 txt 临时目录
 ├── temp_preview/               # 文件预览临时目录
+├── backup_temp/                # 群文件备用上传临时目录
 └── backup_retry/               # 备份失败重试清单
 ```
 

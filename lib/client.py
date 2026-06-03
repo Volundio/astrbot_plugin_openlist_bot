@@ -516,6 +516,114 @@ class OpenlistClient:
             )
             return False
 
+    async def download_url_to_file(
+        self,
+        source_url: str,
+        file_path: str,
+        filename: str,
+        expected_size: Optional[int] = None,
+    ) -> bool:
+        """从 URL 下载到本地临时文件；下载完整后才原子替换到目标路径。"""
+        parsed_source = urlparse(source_url)
+        source_host = parsed_source.hostname or "unknown"
+        source_port = parsed_source.port or (443 if parsed_source.scheme == "https" else 80)
+        partial_path = f"{file_path}.part"
+
+        try:
+            if os.path.exists(partial_path):
+                os.remove(partial_path)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+
+            logger.info(
+                f"开始 URL 下载到本地临时文件: {filename}, source={source_host}:{source_port}, "
+                f"expected_size={expected_size}, temp={file_path}"
+            )
+            timeout = aiohttp.ClientTimeout(
+                total=None,
+                sock_connect=self.transfer_config["upstream_connect_timeout"],
+                sock_read=self.transfer_config["upstream_read_timeout"],
+            )
+            async with self.session.get(source_url, timeout=timeout) as source_response:
+                content_length = source_response.headers.get("Content-Length")
+                content_type = source_response.headers.get("Content-Type")
+                if self.transfer_config["debug_transfer_logging"]:
+                    logger.info(
+                        f"上游文件本地下载响应: HTTP {source_response.status}, source={source_host}, "
+                        f"content_length={content_length}, content_type={content_type}"
+                    )
+                if source_response.status != 200:
+                    error_text = await source_response.text()
+                    logger.error(
+                        f"上游文件本地下载失败: HTTP {source_response.status}, source={source_host}, "
+                        f"响应内容: {error_text[:500]}"
+                    )
+                    return False
+
+                verify_size = expected_size
+                if content_length:
+                    try:
+                        upstream_size = int(content_length)
+                        if verify_size is None or verify_size == 0:
+                            verify_size = upstream_size
+                        elif verify_size != upstream_size:
+                            logger.warning(
+                                f"上游文件大小与事件大小不一致: {filename}, "
+                                f"event_size={verify_size}, upstream_content_length={upstream_size}"
+                            )
+                    except ValueError:
+                        logger.warning(f"上游 Content-Length 无效: {content_length}")
+
+                downloaded = 0
+                last_logged = 0
+                started_at = time.monotonic()
+                with open(partial_path, "wb") as f:
+                    async for chunk in source_response.content.iter_chunked(self.transfer_config["upload_chunk_size"]):
+                        if not chunk:
+                            continue
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if self.transfer_config["debug_transfer_logging"] and (
+                            downloaded == len(chunk)
+                            or downloaded - last_logged >= self.transfer_config["upload_progress_step"]
+                            or (verify_size is not None and downloaded == verify_size)
+                        ):
+                            elapsed = max(time.monotonic() - started_at, 0.001)
+                            speed = downloaded / 1024 / 1024 / elapsed
+                            total = verify_size if verify_size is not None else "unknown"
+                            logger.info(
+                                f"本地下载进度: {filename} {downloaded}/{total} bytes "
+                                f"speed={speed:.2f}MB/s"
+                            )
+                            last_logged = downloaded
+
+                if verify_size is not None and verify_size > 0 and downloaded != verify_size:
+                    logger.error(
+                        f"本地下载大小不完整: {filename}, downloaded={downloaded}, expected={verify_size}"
+                    )
+                    return False
+
+                os.replace(partial_path, file_path)
+                elapsed = max(time.monotonic() - started_at, 0.001)
+                logger.info(
+                    f"URL 下载到本地完成: {filename}, size={downloaded}, "
+                    f"elapsed={elapsed:.2f}s, temp={file_path}"
+                )
+                return True
+
+        except Exception as e:
+            logger.error(
+                f"URL 下载到本地临时文件失败: {e}, 文件: {filename}, source={source_host}, temp={file_path}",
+                exc_info=True,
+            )
+            return False
+        finally:
+            if os.path.exists(partial_path):
+                try:
+                    os.remove(partial_path)
+                except OSError as e:
+                    logger.warning(f"清理本地下载临时分片失败: {partial_path}, err={e}")
+
     async def _put_payload(
         self, payload: aiohttp.Payload, target_path: str, filename: str, source_desc: str = ""
     ) -> bool:
