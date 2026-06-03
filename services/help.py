@@ -21,7 +21,8 @@ class HelpService(PluginService):
 ---
 ▶️ `/ol ls [路径|序号]`
    - 浏览目录: 列出内容，若文件过多会自动分页。
-     - 示例: `/ol ls` 或 `/ol ls /movies`
+     - 示例: `/ol ls`
+     - 示例: `/ol ls /movies`
    - 进入子目录:
      - 示例: `/ol ls 1` (如果1是目录)
    - 获取链接: 获取文件的下载链接，并以 txt 附件发送。
@@ -96,6 +97,8 @@ class HelpService(PluginService):
 ⚙️ `/ol config setup` - 推荐新用户使用，启动交互式配置向导。
 ⚙️ `/ol config show` - 显示您当前的配置。
 ⚙️ `/ol config set <键> <值>` - 修改配置项。
+   - 示例: `/ol config set openlist_url http://127.0.0.1:5244`
+   - 示例: `/ol config set max_upload_size 100`
 ⚙️ `/ol config test` - 测试与服务器的连接。
 ⚙️ `/ol config clear_cache` - 清除文件列表缓存。
 """

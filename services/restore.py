@@ -18,18 +18,21 @@ class RestoreService(PluginService):
         """将 Openlist 路径中的文件恢复到群组或私聊"""
         path = (path or "").strip()
         if not path:
-            yield event.plain_result(self._format_usage_tip(
-                "缺少 OpenList 来源路径",
-                "/ol restore <OpenList路径> [@目标群号]",
-                ["/ol restore /backup/group_123456", "/ol restore /docs @987654", "/ol restore /"],
-                "不指定 @目标群号 时，群聊中恢复到当前群，私聊中以文件消息发送。",
-            ))
+            yield event.plain_result(self._format_restore_usage_tip("缺少 OpenList 来源路径"))
             return
         path = self._normalize_openlist_path(path)
         user_id = event.get_sender_id()
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
-            yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
+            yield event.plain_result(self._format_usage_tip(
+                "请先配置 OpenList 连接信息",
+                "/ol config setup",
+                [
+                    "/ol config setup",
+                    "/ol config set openlist_url http://127.0.0.1:5244",
+                    "/ol config test",
+                ],
+            ))
             return
 
         # 1. 确定目标群号
@@ -39,10 +42,10 @@ class RestoreService(PluginService):
                 try:
                     target_group_id = int(target[1:])
                 except ValueError:
-                    yield event.plain_result(f"❌ 群号格式错误: {target}")
+                    yield event.plain_result(self._format_restore_usage_tip(f"群号格式错误：{target}"))
                     return
             else:
-                yield event.plain_result(f"⚠️ 无法识别目标参数 '{target}'。群号请以 @ 开头。")
+                yield event.plain_result(self._format_restore_usage_tip(f"无法识别目标参数：{target}"))
                 return
 
         # 如果未指定群号，尝试获取当前会话群号
@@ -53,7 +56,15 @@ class RestoreService(PluginService):
 
         is_group = target_group_id is not None
         if is_group and await self._deny_if_no_target_group_permission(event, target_group_id, "恢复文件"):
-            yield event.plain_result("❌ 权限不足：只能恢复到当前群，或由目标群群主/管理员指定 @群号。")
+            yield event.plain_result(self._format_usage_tip(
+                "权限不足：无法恢复到目标群",
+                "/ol restore <OpenList来源路径> [@目标群号]",
+                [
+                    "/ol restore /backup/group_123456",
+                    "/ol restore /docs @987654",
+                ],
+                "只能恢复到当前群，或由目标群群主/管理员指定 @群号。",
+            ))
             return
 
         target_desc = f"群 {target_group_id}" if is_group else "私聊会话"

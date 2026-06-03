@@ -310,21 +310,26 @@ class UploadService(PluginService):
         target = (target or "").strip()
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
-            yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
+            yield event.plain_result(self._format_usage_tip(
+                "请先配置 OpenList 连接信息",
+                "/ol config setup",
+                [
+                    "/ol config setup",
+                    "/ol config set openlist_url http://127.0.0.1:5244",
+                    "/ol config test",
+                ],
+            ))
             return
 
         target_path = self._resolve_target_path(nav_key, target)
         upload_message = self._get_recent_upload_message(event)
         if not upload_message:
-            yield event.plain_result(
-                "❌ 没有找到可上传的附件消息。\n"
-                "用法：先发送图片、视频或文件，再在 5 分钟内发送 /ol upload [目标目录]"
-            )
+            yield event.plain_result(self._format_upload_usage_tip("没有找到可上传的最近附件消息"))
             return
 
         upload_segments = self._extract_upload_segments(upload_message)
         if not upload_segments:
-            yield event.plain_result("❌ 最近附件消息中没有可上传的图片、视频或文件。")
+            yield event.plain_result(self._format_upload_usage_tip("最近附件消息中没有可上传的图片、视频或文件"))
             return
 
         max_upload_size_mb = self._get_size_limit_mb(user_config, "max_upload_size", 100)
@@ -337,7 +342,16 @@ class UploadService(PluginService):
             async with self._create_openlist_client(user_config) as client:
                 result = await client.list_files(target_path, per_page=1)
                 if result is None:
-                    yield event.plain_result(f"❌ 无法访问上传目标目录: {target_path}")
+                    yield event.plain_result(self._format_usage_tip(
+                        f"无法访问上传目标目录：{target_path}",
+                        "/ol upload [OpenList目标目录]",
+                        [
+                            "/ol upload",
+                            "/ol upload /movies",
+                            "/ol upload clips",
+                        ],
+                        "请确认目标目录存在，并且当前 OpenList 账号有写入权限。",
+                    ))
                     return
 
                 yield event.plain_result(f"📤 准备上传最近附件消息中的 {total} 个文件\n📂 目标: {target_path}")
@@ -350,7 +364,10 @@ class UploadService(PluginService):
 
                     if not source_url:
                         fail_count += 1
-                        yield event.plain_result(f"❌ 无法获取附件下载地址: {file_name}")
+                        yield event.plain_result(
+                            f"❌ 无法获取附件下载地址：{file_name}\n"
+                            "提示：请重新发送该附件后再执行 /ol upload，或检查当前 OneBot 适配器是否提供附件 URL。"
+                        )
                         continue
 
                     if not self._is_extension_allowed(file_name, user_config):
@@ -369,13 +386,16 @@ class UploadService(PluginService):
                             fail_count += 1
                             yield event.plain_result(
                                 f"❌ 无法确认文件大小: {file_name}\n"
-                                f"💡 当前 max_upload_size={max_upload_size_mb}MB；如需允许未知大小文件，请将 max_upload_size 设为 0。"
+                                f"提示：当前上传大小限制为 {max_upload_size_mb}MB。"
                             )
                             continue
                         if file_size > max_upload_size:
                             fail_count += 1
                             size_mb = file_size / (1024 * 1024)
-                            yield event.plain_result(f"❌ 文件过大: {file_name} {size_mb:.1f}MB > {max_upload_size_mb}MB")
+                            yield event.plain_result(
+                                f"❌ 文件过大：{file_name} {size_mb:.1f}MB > {max_upload_size_mb}MB\n"
+                                f"提示：当前上传大小限制为 {max_upload_size_mb}MB。"
+                            )
                             continue
 
                     size_text = self._format_file_size(file_size) if file_size is not None else "未知"

@@ -531,17 +531,25 @@ class BackupService(PluginService):
                 self.cache_manager.clear_cache()
             logger.info(f"✅ [自动备份] 任务结束。群 {group_id}: 成功 {success_count}, 跳过 {skipped_count}, 失败 {fail_count}")
 
-    async def backup_command(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
+    async def backup_command(self, event: AstrMessageEvent, path_or_group: str = "", group_or_path: str = ""):
         """群文件备份到 Openlist"""
         user_id = event.get_sender_id()
         user_config = self.get_user_config(user_id)
         if not self._validate_config(user_config):
-            yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
+            yield event.plain_result(self._format_usage_tip(
+                "请先配置 OpenList 连接信息",
+                "/ol config setup",
+                [
+                    "/ol config setup",
+                    "/ol config set openlist_url http://127.0.0.1:5244",
+                    "/ol config test",
+                ],
+            ))
             return
 
-        arg1 = (arg1 or "").strip()
-        arg2 = (arg2 or "").strip()
-        if arg1.lower() in ("retry", "重试") or arg2.lower() in ("retry", "重试"):
+        path_or_group = (path_or_group or "").strip()
+        group_or_path = (group_or_path or "").strip()
+        if path_or_group.lower() in ("retry", "重试") or group_or_path.lower() in ("retry", "重试"):
             async for result in self._retry_last_backup(event, user_config):
                 yield result
             return
@@ -550,7 +558,7 @@ class BackupService(PluginService):
         target_group_id = 0
 
         # 1. 智能解析参数
-        for arg in [arg1, arg2]:
+        for arg in [path_or_group, group_or_path]:
             if not arg: continue
             if arg.startswith("/"):
                 target_path_arg = arg
@@ -558,10 +566,10 @@ class BackupService(PluginService):
                 try:
                     target_group_id = int(arg[1:])
                 except ValueError:
-                    yield event.plain_result(f"❌ 无效的群号格式: {arg}")
+                    yield event.plain_result(self._format_backup_usage_tip(f"无效的群号格式：{arg}"))
                     return
             else:
-                yield event.plain_result(f"⚠️ 无法识别参数 '{arg}'。路径请以 / 开头，群号请以 @ 开头。")
+                yield event.plain_result(self._format_backup_usage_tip(f"无法识别参数：{arg}"))
                 return
 
         # 2. 确定群号 (手动指定优先，否则用当前群)
@@ -570,11 +578,19 @@ class BackupService(PluginService):
             if event_group_id:
                 target_group_id = int(event_group_id)
             else:
-                yield event.plain_result("❌ 请指定群号（以 @ 开头）或在群聊中使用。")
+                yield event.plain_result(self._format_backup_usage_tip("私聊中备份必须指定群号"))
                 return
 
         if await self._deny_if_no_target_group_permission(event, target_group_id, "手动备份"):
-            yield event.plain_result("❌ 权限不足：只能备份当前群，或由目标群群主/管理员指定 @群号。")
+            yield event.plain_result(self._format_usage_tip(
+                "权限不足：无法备份目标群",
+                "/ol backup [@群号] [/OpenList目标路径]",
+                [
+                    "/ol backup",
+                    "/ol backup @123456 /backup/group_123456",
+                ],
+                "只能备份当前群，或由目标群群主/管理员指定 @群号。",
+            ))
             return
 
         target_path = self._render_backup_path(
@@ -585,7 +601,7 @@ class BackupService(PluginService):
         async for result in self._backup_group_files(event, target_group_id, target_path, user_config):
             yield result
 
-    async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", arg1: str = "", arg2: str = ""):
+    async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", target_or_group: str = "", path_or_group: str = ""):
         """配置自动备份"""
         global_cfg = self.get_global_config()
         if not self._is_event_admin(event):
@@ -594,7 +610,7 @@ class BackupService(PluginService):
                 f"group={getattr(event.message_obj, 'group_id', '')}, "
                 f"role={self._extract_sender_role(event)!r}"
             )
-            yield event.plain_result("❌ 权限不足。")
+            yield event.plain_result(self._format_autobackup_usage_tip("权限不足：只有群主或管理员可以配置自动备份"))
             return
 
         action = (action or "show").lower()
@@ -620,9 +636,15 @@ class BackupService(PluginService):
                 lines.append("当前没有启用自动备份的群组。")
             lines.extend([
                 "",
-                "用法:",
+                "用法：",
                 "/ol autobackup enable [@群号] [/OpenList路径]",
                 "/ol autobackup disable [@群号]",
+                "",
+                "示例：",
+                "  /ol autobackup enable",
+                "  /ol autobackup enable @123456 /backup/group_123456",
+                "  /ol autobackup disable @123456",
+                "",
                 "未指定群号时使用当前群；未指定路径时使用 autobackup_default_path。",
             ])
             yield event.plain_result("\n".join(lines))
@@ -632,14 +654,14 @@ class BackupService(PluginService):
         target_path = None
 
         # 1. 智能解析参数: 路径必须以 / 开头，群号必须以 @ 开头
-        for arg in [arg1, arg2]:
+        for arg in [target_or_group, path_or_group]:
             if not arg: continue
             if arg.startswith("/"):
                 target_path = arg
             elif arg.startswith("@"):
                 target_gid = arg[1:]
             else:
-                yield event.plain_result(f"⚠️ 无法识别参数 '{arg}'。路径请以 / 开头，群号请以 @ 开头。")
+                yield event.plain_result(self._format_autobackup_usage_tip(f"无法识别参数：{arg}"))
                 return
 
         # 2. 确定群号 (手动指定优先，否则用当前群)
@@ -648,11 +670,20 @@ class BackupService(PluginService):
             if event_group_id:
                 target_gid = str(event_group_id)
             else:
-                yield event.plain_result("❌ 请指定群号（以 @ 开头）或在群聊中使用。")
+                yield event.plain_result(self._format_autobackup_usage_tip("私聊中配置自动备份必须指定群号"))
                 return
 
         if await self._deny_if_no_target_group_permission(event, target_gid, "自动备份配置"):
-            yield event.plain_result("❌ 权限不足：只能配置当前群，或由目标群群主/管理员指定 @群号。")
+            yield event.plain_result(self._format_usage_tip(
+                "权限不足：无法配置目标群自动备份",
+                "/ol autobackup <enable|disable> [@群号] [/OpenList目标路径]",
+                [
+                    "/ol autobackup enable",
+                    "/ol autobackup enable @123456 /backup/group_123456",
+                    "/ol autobackup disable @123456",
+                ],
+                "只能配置当前群，或由目标群群主/管理员指定 @群号。",
+            ))
             return
 
         local_cfg = self.global_config_manager.load_config()
@@ -696,4 +727,4 @@ class BackupService(PluginService):
             else:
                 yield event.plain_result(f"💡 群 {target_gid} 当前未开启自动备份。")
         else:
-            yield event.plain_result("❌ 未知操作。请使用 enable 或 disable。")
+            yield event.plain_result(self._format_autobackup_usage_tip(f"未知的自动备份操作：{action}"))

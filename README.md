@@ -163,7 +163,7 @@
 
 插件支持主指令 `/ol` 及其别名 `/网盘`。以下是常用指令及其对应的中文别名：
 
-> 发送 `/ol` 或 `/ol help` 可查看完整帮助。子命令缺少参数时，插件会返回对应的简短用法和示例。
+> 发送 `/ol` 或 `/ol help` 可查看完整帮助。子命令缺少参数或参数格式错误时，插件会返回对应的简短用法、示例和必要提示。
 
 | 指令 | 中文别名 | 指令示例 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -277,7 +277,7 @@
 
 ```
 # 手动备份群文件到 OpenList
-# 用法: /ol backup [@群号] [/目标路径]
+# 用法：/ol backup [@群号] [/目标路径]
 /ol backup @123456789 /backup/group_files
 /ol backup /my_backup
 /ol backup
@@ -293,7 +293,7 @@
 /ol autobackup disable @123456789
 
 # 从 OpenList 恢复文件到群
-# 用法: /ol restore /来源路径 [@目标群号]
+# 用法：/ol restore /来源路径 [@目标群号]
 /ol restore /backup/important_file @123456789
 /ol restore /backup/folder
 ```

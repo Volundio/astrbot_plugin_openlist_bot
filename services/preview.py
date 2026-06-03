@@ -31,11 +31,22 @@ class PreviewService(PluginService):
         # 检查配置
         max_preview_size_mb = user_config.get("max_preview_size", 0)
         if max_preview_size_mb == -1:
-            yield event.plain_result("❌ 预览功能已禁用。")
+            yield event.plain_result(
+                "❌ 预览功能已禁用。\n"
+                "提示：如需重新启用，可发送 /ol config set max_preview_size 0，或设置具体 MB 限制。"
+            )
             return
 
         if not self._validate_config(user_config):
-            yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
+            yield event.plain_result(self._format_usage_tip(
+                "请先配置 OpenList 连接信息",
+                "/ol config setup",
+                [
+                    "/ol config setup",
+                    "/ol config set openlist_url http://127.0.0.1:5244",
+                    "/ol config test",
+                ],
+            ))
             return
 
         # 获取文件信息
@@ -47,11 +58,21 @@ class PreviewService(PluginService):
             item = self._get_item_by_number(nav_key, number)
             if item:
                 if item.get("is_dir"):
-                    yield event.plain_result("❌ 无法预览目录，请指定一个文件。")
+                    yield event.plain_result(self._format_usage_tip(
+                        f"序号 {number} 是目录，无法预览",
+                        "/ol preview <文件路径|文件序号>",
+                        ["/ol preview 1", "/ol preview /data/config.txt"],
+                        "如需查看目录内容，请使用 /ol ls 序号。",
+                    ))
                     return
                 full_path = self._get_item_full_path(nav_key, item, user_config)
             else:
-                yield event.plain_result(f"❌ 序号 {number} 无效")
+                yield event.plain_result(self._format_usage_tip(
+                    f"序号 {number} 无效",
+                    "/ol preview <路径|序号>",
+                    ["/ol ls", "/ol preview 1", "/ol preview /data/config.txt"],
+                    "序号来自当前会话最近一次 /ol ls 或 /ol search 的列表。",
+                ))
                 return
         else:
             path_candidates = self._resolve_path_candidates(nav_key, path_or_num)
@@ -67,10 +88,20 @@ class PreviewService(PluginService):
                             break
                     if not item:
                         display_path = " / ".join(path_candidates)
-                        yield event.plain_result(f"❌ 未找到文件: {display_path}")
+                        yield event.plain_result(self._format_usage_tip(
+                            f"未找到文件：{display_path}",
+                            "/ol preview <文件路径|文件序号>",
+                            ["/ol preview 1", "/ol preview /data/config.txt"],
+                            "不以 / 开头时，会优先按当前目录的相对路径解析。",
+                        ))
                         return
                     if item.get("is_dir"):
-                        yield event.plain_result("❌ 无法预览目录，请指定一个文件。")
+                        yield event.plain_result(self._format_usage_tip(
+                            "无法预览目录",
+                            "/ol preview <文件路径|文件序号>",
+                            ["/ol preview 1", "/ol preview /data/config.txt"],
+                            "目录请使用 /ol ls 查看；预览仅支持文件。",
+                        ))
                         return
 
                 file_name = item.get("name", "")
@@ -115,7 +146,10 @@ class PreviewService(PluginService):
                 # 检查文件大小限制
                 if max_preview_size_mb > 0:
                     if file_size > max_preview_size_mb * 1024 * 1024:
-                        yield event.plain_result(f"❌ 文件过大 ({file_size / (1024*1024):.2f} MB)，超过了最大预览限制 ({max_preview_size_mb} MB)。")
+                        yield event.plain_result(
+                            f"❌ 文件过大：{file_size / (1024*1024):.2f}MB > {max_preview_size_mb}MB\n"
+                            "请使用 /ol ls 获取下载链接。"
+                        )
                         return
 
                 yield event.plain_result(f"🔍 正在获取预览: {file_name}...")
@@ -150,8 +184,8 @@ class PreviewService(PluginService):
                                         downloaded += len(chunk)
                                         if max_preview_size_mb > 0 and downloaded > max_preview_size_mb * 1024 * 1024:
                                             yield event.plain_result(
-                                                f"❌ 文件过大 ({downloaded / (1024*1024):.2f} MB)，"
-                                                f"超过了最大预览限制 ({max_preview_size_mb} MB)。"
+                                                f"❌ 文件过大：{downloaded / (1024*1024):.2f}MB > {max_preview_size_mb}MB\n"
+                                                "请使用 /ol ls 获取下载链接。"
                                             )
                                             return
                             else:
@@ -189,7 +223,11 @@ class PreviewService(PluginService):
                             logger.error(f"文本预览失败: {e}")
                             yield event.plain_result(f"❌ 文本解析失败: {e}")
                     else:
-                        yield event.plain_result(f"❓ 该格式 ({ext}) 不在支持的文本预览列表中。")
+                        yield event.plain_result(
+                            f"❓ 该格式 ({ext or '无扩展名'}) 不在支持的文本预览列表中。\n"
+                            "示例：/ol preview /data/config.txt\n"
+                            "提示：如需下载该文件，请使用 /ol download <路径|序号>。"
+                        )
 
                 finally:
                     # 清理临时文件

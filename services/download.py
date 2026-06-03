@@ -34,7 +34,10 @@ class DownloadService(PluginService):
         max_download_size = max_download_size_mb * 1024 * 1024
         if max_download_size_mb > 0 and file_size > max_download_size:
             size_mb = file_size / (1024 * 1024)
-            yield event.plain_result(f"❌ 文件过大: {size_mb:.1f}MB > {max_download_size_mb}MB\n💡 请使用 /ol ls 获取下载链接")
+            yield event.plain_result(
+                f"❌ 文件过大：{size_mb:.1f}MB > {max_download_size_mb}MB\n"
+                "请使用 /ol ls 获取下载链接。"
+            )
             return
         try:
             if full_path_override:
@@ -45,7 +48,12 @@ class DownloadService(PluginService):
             async with self._create_openlist_client(user_config) as client:
                 link = await client.get_direct_download_link(file_path)
                 if not link:
-                    yield event.plain_result("❌ 无法获取真实下载链接，请确认配置账号为 OpenList 管理员或具有 /api/fs/link 权限")
+                    yield event.plain_result(
+                        "❌ 无法获取真实下载链接。\n"
+                        "用法：/ol config set token <OpenList令牌>\n"
+                        "示例：/ol config test\n"
+                        "提示：请确认配置账号为 OpenList 管理员，或具有 /api/fs/link 权限。"
+                    )
                     return
                 download_url = link["url"]
                 download_headers = self._normalize_download_headers(link.get("header", {}))
@@ -58,7 +66,10 @@ class DownloadService(PluginService):
                     file_size = link_size
                 if max_download_size_mb > 0 and link_size > max_download_size:
                     size_mb = link_size / (1024 * 1024)
-                    yield event.plain_result(f"❌ 文件过大: {size_mb:.1f}MB > {max_download_size_mb}MB\n💡 请使用 /ol ls 获取下载链接")
+                    yield event.plain_result(
+                        f"❌ 文件过大：{size_mb:.1f}MB > {max_download_size_mb}MB\n"
+                        "请使用 /ol ls 获取下载链接。"
+                    )
                     return
                 downloads_dir = os.path.join(StarTools.get_data_dir("openlist"), "downloads")
                 os.makedirs(downloads_dir, exist_ok=True)
@@ -81,8 +92,8 @@ class DownloadService(PluginService):
                                     if max_download_size_mb > 0 and downloaded > max_download_size:
                                         size_mb = downloaded / (1024 * 1024)
                                         yield event.plain_result(
-                                            f"❌ 文件过大: {size_mb:.1f}MB > {max_download_size_mb}MB\n"
-                                            f"💡 请使用 /ol ls 获取下载链接"
+                                            f"❌ 文件过大：{size_mb:.1f}MB > {max_download_size_mb}MB\n"
+                                            "请使用 /ol ls 获取下载链接。"
                                         )
                                         return
                                     if (
