@@ -52,11 +52,14 @@ class BackupService(PluginService):
         return self._backup_item_target(target_path, item, use_override=False)[2]
 
     def _backup_item_identity(self, target_path: str, item: Dict) -> tuple:
+        target_key = self._backup_item_lock_key(target_path, item)
+        size = self._backup_item_size(item)
+        if size is not None:
+            return ("target_size", target_key, size)
         file_id = item.get("file_id")
         if file_id:
-            return ("file_id", str(file_id))
-        target_key = self._backup_item_lock_key(target_path, item)
-        return ("target_size", target_key, self._backup_item_size(item))
+            return ("file_id", target_key, str(file_id))
+        return ("target_unknown_size", target_key)
 
     def _safe_suffix_part(self, value: str) -> str:
         suffix = "".join(c for c in str(value or "") if c.isalnum() or c in "-_").strip("-_")
@@ -99,8 +102,13 @@ class BackupService(PluginService):
                 continue
 
             _, file_name, _ = self._backup_item_target(target_path, item, use_override=False)
-            renamed_item = dict(item)
             used_for_target = used_names.setdefault(target_key, set())
+            if not used_for_target:
+                used_for_target.add(file_name)
+                deduped.append(item)
+                continue
+
+            renamed_item = dict(item)
             suffix = self._backup_duplicate_suffix(item)
             target_name = self._filename_with_suffix(file_name, suffix)
             index = 2
@@ -241,14 +249,13 @@ class BackupService(PluginService):
                         if skip_existing:
                             existing_files = await self._openlist_files_by_name(client, target_path)
                             existing = existing_files.get(file_name)
-                            if existing and self._existing_entry_matches(existing, file_size) and not file_id:
+                            if existing and self._existing_entry_matches(existing, file_size):
                                 logger.info(f"⏭️ [自动备份] 跳过已存在文件: {target_path}/{file_name}")
                                 return
                             target_file_name = self._resolve_backup_target_name(
                                 existing_files,
                                 file_name,
                                 item,
-                                force_unique=bool(existing and file_id),
                             )
                             if target_file_name != file_name:
                                 item["_backup_target_name"] = target_file_name
@@ -692,6 +699,7 @@ class BackupService(PluginService):
                     if should_cancel():
                         return
                     target_dir, file_name, _ = self._backup_item_target(target_path, item)
+                    original_target_dir, original_file_name, _ = self._backup_item_target(target_path, item, use_override=False)
                     if not file_name:
                         fail_count += 1
                         failed_items.append(dict(item))
@@ -716,6 +724,16 @@ class BackupService(PluginService):
                                 skipped_count += 1
                                 logger.info(f"⏭️ [群备份] 跳过已存在文件: {target_dir}/{file_name}")
                                 return
+                            if (
+                                item.get("_backup_target_name")
+                                and original_target_dir == target_dir
+                                and original_file_name != file_name
+                            ):
+                                original_existing = existing_files.get(original_file_name)
+                                if original_existing and self._existing_entry_matches(original_existing, item.get("file_size")):
+                                    skipped_count += 1
+                                    logger.info(f"⏭️ [群备份] 跳过已存在文件: {target_dir}/{original_file_name}")
+                                    return
 
                         resolved_name = self._resolve_backup_target_name(existing_files, file_name, item)
                         if resolved_name != file_name:
