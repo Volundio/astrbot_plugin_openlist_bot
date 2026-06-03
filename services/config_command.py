@@ -41,19 +41,19 @@ class ConfigCommandService(PluginService):
 请按以下步骤配置：
 
 1️⃣ 设置Openlist服务器地址:
-   /ol config set openlist_url http://your-server:5244
+   ol config set openlist_url http://your-server:5244
 
 2️⃣ 设置用户名(可选):
-   /ol config set username your_username
+   ol config set username your_username
 
 3️⃣ 设置密码(可选):
-   /ol config set password your_password
+   ol config set password your_password
 
 4️⃣ 测试连接:
-   /ol config test
+   ol config test
 
 5️⃣ 开始使用:
-   /ol ls /
+   ol ls /
 
 💡 如果服务器不需要登录，只需要设置openlist_url即可"""
             yield event.plain_result(setup_text)
@@ -61,16 +61,16 @@ class ConfigCommandService(PluginService):
             if not key:
                 yield event.plain_result(self._format_usage_tip(
                     "缺少配置项名称",
-                    "/ol config set <配置项> <值>",
-                    ["/ol config set openlist_url http://your-server:5244", "/ol config set max_upload_size 100"],
-                    "发送 /ol config show 可以查看当前配置。",
+                    "ol config set <配置项> <值>",
+                    ["ol config set openlist_url http://your-server:5244", "ol config set max_upload_size 100"],
+                    "发送 ol config show 可以查看当前配置。",
                 ))
                 return
             if not value:
                 yield event.plain_result(self._format_usage_tip(
                     "缺少配置项值",
-                    f"/ol config set {key} <值>",
-                    [f"/ol config set {key} 示例值"],
+                    f"ol config set {key} <值>",
+                    [f"ol config set {key} 示例值"],
                     "如需清空扩展名限制，可使用 none、clear、all 或 不限制。",
                 ))
                 return
@@ -79,12 +79,12 @@ class ConfigCommandService(PluginService):
             if key not in USER_SETTABLE_CONFIG_KEYS:
                 yield event.plain_result(self._format_usage_tip(
                     f"未知的配置项：{key}",
-                    "/ol config set <配置项> <值>",
+                    "ol config set <配置项> <值>",
                     [
-                        "/ol config set openlist_url http://127.0.0.1:5244",
-                        "/ol config set max_upload_size 100",
-                        "/ol config set allowed_extensions .jpg,.png,.mp4",
-                        "/ol config set enable_cache true",
+                        "ol config set openlist_url http://127.0.0.1:5244",
+                        "ol config set max_upload_size 100",
+                        "ol config set allowed_extensions .jpg,.png,.mp4",
+                        "ol config set enable_cache true",
                     ],
                     f"可用配置项：{', '.join(USER_SETTABLE_CONFIG_KEYS)}",
                 ))
@@ -98,16 +98,16 @@ class ConfigCommandService(PluginService):
                     if value < min_value or (max_value is not None and value > max_value):
                         yield event.plain_result(self._format_usage_tip(
                             error_message,
-                            f"/ol config set {key} <数字>",
-                            [f"/ol config set {key} {min_value}"],
+                            f"ol config set {key} <数字>",
+                            [f"ol config set {key} {min_value}"],
                             "0 通常表示不限制；具体含义以该配置项说明为准。",
                         ))
                         return
                 except ValueError:
                     yield event.plain_result(self._format_usage_tip(
                         f"{key} 必须是数字",
-                        f"/ol config set {key} <数字>",
-                        [f"/ol config set {key} 100"],
+                        f"ol config set {key} <数字>",
+                        [f"ol config set {key} 100"],
                     ))
                     return
             elif key in BOOLEAN_CONFIG_KEYS:
@@ -134,12 +134,12 @@ class ConfigCommandService(PluginService):
             if not self._validate_config(user_config):
                 yield event.plain_result(self._format_usage_tip(
                     "尚未配置 OpenList 服务器地址",
-                    "/ol config set openlist_url <OpenList地址>",
+                    "ol config set openlist_url <OpenList地址>",
                     [
-                        "/ol config set openlist_url http://127.0.0.1:5244",
-                        "/ol config setup",
+                        "ol config set openlist_url http://127.0.0.1:5244",
+                        "ol config setup",
                     ],
-                    "配置完成后发送 /ol config test 测试连接。",
+                    "配置完成后发送 ol config test 测试连接。",
                 ))
                 return
             try:

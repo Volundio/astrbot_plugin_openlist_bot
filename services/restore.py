@@ -26,11 +26,11 @@ class RestoreService(PluginService):
         if not self._validate_config(user_config):
             yield event.plain_result(self._format_usage_tip(
                 "请先配置 OpenList 连接信息",
-                "/ol config setup",
+                "ol config setup",
                 [
-                    "/ol config setup",
-                    "/ol config set openlist_url http://127.0.0.1:5244",
-                    "/ol config test",
+                    "ol config setup",
+                    "ol config set openlist_url http://127.0.0.1:5244",
+                    "ol config test",
                 ],
             ))
             return
@@ -58,10 +58,10 @@ class RestoreService(PluginService):
         if is_group and await self._deny_if_no_target_group_permission(event, target_group_id, "恢复文件"):
             yield event.plain_result(self._format_usage_tip(
                 "权限不足：无法恢复到目标群",
-                "/ol restore <OpenList来源路径> [@目标群号]",
+                "ol restore <OpenList来源路径> [@目标群号]",
                 [
-                    "/ol restore /backup/group_123456",
-                    "/ol restore /docs @987654",
+                    "ol restore /backup/group_123456",
+                    "ol restore /docs @987654",
                 ],
                 "只能恢复到当前群，或由目标群群主/管理员指定 @群号。",
             ))

@@ -135,7 +135,7 @@ class UploadService(PluginService):
         return self_id not in (None, "") and str(self_id) == str(user_id)
 
     async def remember_uploadable_message(self, event: AstrMessageEvent):
-        """记录同会话最近的附件消息，供 /ol upload 使用。"""
+        """记录同会话最近的附件消息，供 ol upload 使用。"""
         self._prune_recent_upload_messages()
         raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
         if not isinstance(raw_message, dict):
@@ -312,11 +312,11 @@ class UploadService(PluginService):
         if not self._validate_config(user_config):
             yield event.plain_result(self._format_usage_tip(
                 "请先配置 OpenList 连接信息",
-                "/ol config setup",
+                "ol config setup",
                 [
-                    "/ol config setup",
-                    "/ol config set openlist_url http://127.0.0.1:5244",
-                    "/ol config test",
+                    "ol config setup",
+                    "ol config set openlist_url http://127.0.0.1:5244",
+                    "ol config test",
                 ],
             ))
             return
@@ -344,11 +344,11 @@ class UploadService(PluginService):
                 if result is None:
                     yield event.plain_result(self._format_usage_tip(
                         f"无法访问上传目标目录：{target_path}",
-                        "/ol upload [OpenList目标目录]",
+                        "ol upload [OpenList目标目录]",
                         [
-                            "/ol upload",
-                            "/ol upload /movies",
-                            "/ol upload clips",
+                            "ol upload",
+                            "ol upload /movies",
+                            "ol upload clips",
                         ],
                         "请确认目标目录存在，并且当前 OpenList 账号有写入权限。",
                     ))
@@ -366,7 +366,7 @@ class UploadService(PluginService):
                         fail_count += 1
                         yield event.plain_result(
                             f"❌ 无法获取附件下载地址：{file_name}\n"
-                            "提示：请重新发送该附件后再执行 /ol upload，或检查当前 OneBot 适配器是否提供附件 URL。"
+                            "提示：请重新发送该附件后再执行 ol upload，或检查当前 OneBot 适配器是否提供附件 URL。"
                         )
                         continue
 

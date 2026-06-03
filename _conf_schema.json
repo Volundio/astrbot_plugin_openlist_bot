@@ -164,13 +164,13 @@
                 "description": "手动备份默认目录",
                 "type": "string",
                 "default": "/backup/group_{group_id}",
-                "hint": "使用 /ol backup 且未指定路径时的 OpenList 目录。支持 {group_id}、{gid}、{group} 占位符。"
+                "hint": "使用 ol backup 且未指定路径时的 OpenList 目录。支持 {group_id}、{gid}、{group} 占位符。"
             },
             "autobackup_default_path": {
                 "description": "自动备份默认目录",
                 "type": "string",
                 "default": "/backup/group_{group_id}",
-                "hint": "自动备份群配置未指定路径，或 /ol autobackup enable 未传路径时使用。支持 {group_id}、{gid}、{group} 占位符。"
+                "hint": "自动备份群配置未指定路径，或 ol autobackup enable 未传路径时使用。支持 {group_id}、{gid}、{group} 占位符。"
             },
             "autobackup_groups": {
                 "description": "启用自动备份的群组",

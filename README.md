@@ -23,10 +23,10 @@
 * 📁 **智能导航** - 序号快速导航，支持进入文件夹、返回上级目录和分页浏览，并按会话隔离状态。
 * 📥 **直接下载** - 通过 OpenList API 获取真实下载地址，并使用 AstrBot `File` 组件发送文件。
 * 🔗 **链接获取** - 下载链接会以 txt 附件发送，避免长链接被平台自动转成图片。
-* 📤 **文件上传** - 先发送图片、视频或文件，再使用 `/ol upload` 上传同会话最近 5 分钟内的附件消息。
+* 📤 **文件上传** - 先发送图片、视频或文件，再使用 `ol upload` 上传同会话最近 5 分钟内的附件消息。
 * 🔍 **文件搜索** - 支持在指定目录中搜索目标文件。
 * 📋 **文件信息** - 查看文件详细信息，并可附带下载链接 txt 附件。
-* 📦 **备份恢复** - 支持群文件递归备份、失败重试、跳过重复文件和恢复文件到群。
+* 📦 **备份恢复** - 支持群文件递归备份、失败重试、跳过重复文件、同名冲突改名和恢复文件到群。
 * 🔄 **自动备份** - 支持群文件新增自动备份，开启时会立即执行一次全量备份。
 * 👁️ **内容预览** - 支持文本文件预览和压缩包内容查看。
 * ⚙️ **灵活设置** - 支持全局设置和用户独立设置两种模式。
@@ -80,7 +80,7 @@
 #### 快速设置向导
 
 ```
-/ol config setup
+ol config setup
 ```
 
 #### 手动设置
@@ -89,39 +89,39 @@
 
 ```
 # 显示当前设置
-/ol config show
+ol config show
 
 # 设置 OpenList API 地址（机器人访问）
-/ol config set openlist_url http://your-server:5244
+ol config set openlist_url http://your-server:5244
 
 # 设置用户名（可选）
-/ol config set username your_username
+ol config set username your_username
 
 # 设置密码（可选）
-/ol config set password your_password
+ol config set password your_password
 
 # 设置访问 Token（可选，优先级高于用户名密码）
-/ol config set token your_token
+ol config set token your_token
 
 # 设置对外下载地址（可选；普通部署留空）
-/ol config set public_openlist_url https://your-public-domain
+ol config set public_openlist_url https://your-public-domain
 
 # 设置路径前缀修正（高级可选；普通部署留空）
-/ol config set fixed_base_directory /夸克
+ol config set fixed_base_directory /夸克
 
 # 设置允许的文件扩展名（留空表示不限制）
-/ol config set allowed_extensions .txt,.pdf,.mp4
+ol config set allowed_extensions .txt,.pdf,.mp4
 
 # 设置最大下载 / 上传 / 预览大小（MB，0 表示不限制）
-/ol config set max_download_size 50
-/ol config set max_upload_size 100
-/ol config set max_preview_size 10
+ol config set max_download_size 50
+ol config set max_upload_size 100
+ol config set max_preview_size 10
 
 # 测试连接
-/ol config test
+ol config test
 
 # 清理文件列表缓存
-/ol config clear_cache
+ol config clear_cache
 ```
 
 #### 传输与备份调优
@@ -130,29 +130,30 @@
 
 ```
 # 普通上传单文件重试：总尝试次数 3，每次间隔 5 秒
-/ol config set upload_retry_attempts 3
-/ol config set upload_retry_delay 5
+ol config set upload_retry_attempts 3
+ol config set upload_retry_delay 5
 
 # 传输调优
-/ol config set upload_chunk_size_mb 4
-/ol config set upload_progress_step_mb 64
-/ol config set upstream_connect_timeout 60
-/ol config set upstream_read_timeout 180
-/ol config set openlist_connect_timeout 30
-/ol config set openlist_upload_response_timeout 3000
+ol config set upload_chunk_size_mb 4
+ol config set upload_progress_step_mb 64
+ol config set upstream_connect_timeout 60
+ol config set upstream_read_timeout 180
+ol config set openlist_connect_timeout 30
+ol config set openlist_upload_response_timeout 3000
 
 # 开启上传/下载/DNS 诊断日志（默认关闭）
-/ol config set debug_transfer_logging true
+ol config set debug_transfer_logging true
 
 # 设置手动备份默认目录（支持 {group_id} 占位符）
-/ol config set backup_default_path /backup/group_{group_id}
+ol config set backup_default_path /backup/group_{group_id}
 
 # 备份时跳过目标目录内同名且大小一致的文件（默认开启）
-/ol config set backup_skip_existing true
+# 同名但不是同一群文件记录的文件会自动改名备份，避免覆盖
+ol config set backup_skip_existing true
 
 # 设置备份单文件重试：总尝试次数 3，每次间隔 5 秒
-/ol config set backup_retry_attempts 3
-/ol config set backup_retry_delay 5
+ol config set backup_retry_attempts 3
+ol config set backup_retry_delay 5
 ```
 
 ---
@@ -161,28 +162,28 @@
 
 ### 📝 指令列表
 
-插件支持主指令 `/ol` 及其别名 `/网盘`。以下是常用指令及其对应的中文别名：
+插件支持主指令 `ol` 及其别名 `网盘`。以下是常用指令及其对应的中文别名：
 
-> 发送 `/ol` 或 `/ol help` 可查看完整帮助。子命令缺少参数或参数格式错误时，插件会返回对应的简短用法、示例和必要提示。
+> 发送 `ol` 或 `ol help` 可查看完整帮助。子命令缺少参数或参数格式错误时，插件会返回对应的简短用法、示例和必要提示。
 
 | 指令 | 中文别名 | 指令示例 | 说明 |
 | :--- | :--- | :--- | :--- |
-| `/ol ls` | `/网盘 列表`, `/网盘 直链` | `/ol ls /` | 列出文件/获取下载链接（txt 附件） |
-| `/ol config` | `/网盘 配置` | `/ol config show` | 配置插件参数 |
-| `/ol next` | `/网盘 下一页` | `/ol next` | 列表翻页（下一页） |
-| `/ol prev` | `/网盘 上一页` | `/ol prev` | 列表翻页（上一页） |
-| `/ol search` | `/网盘 搜索` | `/ol search "关键词"` | 搜索文件 |
-| `/ol info` | `/网盘 信息` | `/ol info /path/file` | 查看文件/目录详细信息 |
-| `/ol download` | `/网盘 下载` | `/ol download 1` | 直接下载文件并发送 |
-| `/ol upload` | `/网盘 上传` | `/ol upload /path` | 上传最近附件消息中的图片、视频或文件 |
-| `/ol backup` | `/网盘 备份` | `/ol backup /path @群号` | 手动备份群文件 |
-| `/ol autobackup` | `/网盘 自动备份` | `/ol autobackup enable` | 配置自动备份 |
-| `/ol restore` | `/网盘 恢复` | `/ol restore /path @群号` | 从网盘恢复文件 |
-| `/ol preview` | `/网盘 预览` | `/ol preview 1` | 预览文本或压缩包 |
-| `/ol rm` | `/网盘 删除` | `/ol rm 1` | 删除文件或目录 |
-| `/ol mkdir` | `/网盘 新建` | `/ol mkdir folder` | 创建新目录 |
-| `/ol quit` | `/网盘 上一级`, `/网盘 返回` | `/ol quit` | 返回上级目录 |
-| `/ol help` | `/网盘 帮助` | `/ol help` | 显示帮助信息 |
+| `ol ls` | `网盘 列表`, `网盘 直链` | `ol ls /` | 列出文件/获取下载链接（txt 附件） |
+| `ol config` | `网盘 配置` | `ol config show` | 配置插件参数 |
+| `ol next` | `网盘 下一页` | `ol next` | 列表翻页（下一页） |
+| `ol prev` | `网盘 上一页` | `ol prev` | 列表翻页（上一页） |
+| `ol search` | `网盘 搜索` | `ol search "关键词"` | 搜索文件 |
+| `ol info` | `网盘 信息` | `ol info /path/file` | 查看文件/目录详细信息 |
+| `ol download` | `网盘 下载` | `ol download 1` | 直接下载文件并发送 |
+| `ol upload` | `网盘 上传` | `ol upload /path` | 上传最近附件消息中的图片、视频或文件 |
+| `ol backup` | `网盘 备份` | `ol backup /path @群号` | 手动备份群文件 |
+| `ol autobackup` | `网盘 自动备份` | `ol autobackup enable` | 配置自动备份，支持取消首次全量备份 |
+| `ol restore` | `网盘 恢复` | `ol restore /path @群号` | 从网盘恢复文件 |
+| `ol preview` | `网盘 预览` | `ol preview 1` | 预览文本或压缩包 |
+| `ol rm` | `网盘 删除` | `ol rm 1` | 删除文件或目录 |
+| `ol mkdir` | `网盘 新建` | `ol mkdir folder` | 创建新目录 |
+| `ol quit` | `网盘 上一级`, `网盘 返回` | `ol quit` | 返回上级目录 |
+| `ol help` | `网盘 帮助` | `ol help` | 显示帮助信息 |
 
 ### 📂 浏览与导航
 
@@ -190,26 +191,26 @@
 
 ```
 # 查看帮助文档
-/ol help
+ol help
 
 # 列出根目录文件
-/ol ls /
+ol ls /
 
 # 使用序号进入子目录
-/ol ls 1          # 如果 1 号是目录，则进入该目录
+ol ls 1          # 如果 1 号是目录，则进入该目录
 
 # 如果序号对应文件，则获取下载链接 txt 附件
-/ol ls 2
+ol ls 2
 
 # 翻页
-/ol next          # 查看下一页
-/ol prev          # 查看上一页
+ol next          # 查看下一页
+ol prev          # 查看上一页
 
 # 返回上级目录
-/ol quit
+ol quit
 
 # 路径方式
-/ol ls /movies    # 列出 /movies 目录的内容
+ol ls /movies    # 列出 /movies 目录的内容
 ```
 
 ### 🔍 文件搜索与信息
@@ -218,25 +219,25 @@
 
 ```
 # 搜索文件（注意：依赖服务器索引，结果可能非最新）
-/ol search "年度报告"
+ol search "年度报告"
 
 # 在指定目录搜索
-/ol search "年度报告" /documents
+ol search "年度报告" /documents
 
 # 查看文件信息
-/ol info /movies/Inception.mkv
+ol info /movies/Inception.mkv
 
 # 预览文件内容（支持文本和压缩包）
-/ol preview 2
-/ol preview /data/config.txt
+ol preview 2
+ol preview /data/config.txt
 
 # 新建文件夹
-/ol mkdir my_folder
-/ol mkdir /data/new_dir
+ol mkdir my_folder
+ol mkdir /data/new_dir
 
 # 删除文件或文件夹（谨慎操作）
-/ol rm 3
-/ol rm /temp/old_file.txt
+ol rm 3
+ol rm /temp/stale_file.txt
 ```
 
 ### 📥 下载与上传
@@ -245,28 +246,28 @@
 
 ```
 # 方式一：获取下载链接（txt 附件）
-/ol ls 2
-/ol ls /movies/Inception.mkv
+ol ls 2
+ol ls /movies/Inception.mkv
 
 # 方式二：直接下载文件
-/ol download 2
-/ol download /movies/Inception.mkv
+ol download 2
+ol download /movies/Inception.mkv
 
 # 先发送图片、视频或文件，再上传到当前目录
-/ol upload
+ol upload
 
 # 先发送图片、视频或文件，再上传到指定目录
-/ol upload /movies
+ol upload /movies
 
 # 先发送图片、视频或文件，再上传到当前目录下的子目录
-/ol upload clips
+ol upload clips
 ```
 
 说明：
 
-* `/ol ls` 获取文件链接时，会将下载链接写入 txt 附件发送，避免长文本被平台转成图片。
-* `/ol download` 会先通过 OpenList API 获取真实下载链接，再下载到本地临时文件并用 `File` 组件发送。
-* `/ol upload` 使用同会话、同一发送者 5 分钟内最近一条附件消息；不依赖 QQ/OneBot 的引用回复解析。
+* `ol ls` 获取文件链接时，会将下载链接写入 txt 附件发送，避免长文本被平台转成图片。
+* `ol download` 会先通过 OpenList API 获取真实下载链接，再下载到本地临时文件并用 `File` 组件发送。
+* `ol upload` 使用同会话、同一发送者 5 分钟内最近一条附件消息；不依赖 QQ/OneBot 的引用回复解析。
 * 最近附件缓存只保存消息元数据和 URL，不保存文件内容；缓存最多保留 500 个会话条目，并忽略机器人自己发出的消息。
 * 上传使用平台提供的文件 URL 进行流式中转；群文件没有 URL 时会尝试通过 OneBot 群文件接口获取下载地址。
 * 浏览列表、分页和序号操作按会话隔离；同一用户在不同群聊或私聊中使用不会串用序号状态。
@@ -277,38 +278,43 @@
 
 ```
 # 手动备份群文件到 OpenList
-# 用法：/ol backup [@群号] [/目标路径]
-/ol backup @123456789 /backup/group_files
-/ol backup /my_backup
-/ol backup
+# 用法：ol backup [@群号] [/目标路径]
+ol backup @123456789 /backup/group_files
+ol backup /my_backup
+ol backup
 
 # 只重试上次备份失败的文件
-/ol backup retry
+ol backup retry
 
 # 自动备份设置
-/ol autobackup
-/ol autobackup enable
-/ol autobackup enable @123456789 /backup/group_{group_id}
-/ol autobackup disable
-/ol autobackup disable @123456789
+ol autobackup
+ol autobackup enable
+ol autobackup enable @123456789 /backup/group_{group_id}
+ol autobackup disable
+ol autobackup disable @123456789
+ol autobackup cancel
+ol autobackup cancel @123456789
 
 # 从 OpenList 恢复文件到群
-# 用法：/ol restore /来源路径 [@目标群号]
-/ol restore /backup/important_file @123456789
-/ol restore /backup/folder
+# 用法：ol restore /来源路径 [@目标群号]
+ol restore /backup/important_file @123456789
+ol restore /backup/folder
 ```
 
 说明：
 
-* `/ol backup` 未指定路径时使用 `backup_default_path`。
-* `/ol backup` 支持 `@群号` 和 `/目标路径` 两个参数，顺序不限。
+* `ol backup` 未指定路径时使用 `backup_default_path`。
+* `ol backup` 支持 `@群号` 和 `/目标路径` 两个参数，顺序不限。
 * `backup_default_path`、`autobackup_default_path` 支持 `{group_id}`、`{gid}`、`{group}` 占位符。
 * 备份默认会跳过目标目录中同名且大小一致的文件。
-* 备份失败项会保存到临时失败清单，使用 `/ol backup retry` 可只重试失败项。
-* `/ol autobackup enable` 开启自动备份后，会立即执行一次全量备份。
+* 同名但不是同一群文件记录的文件会自动改名备份，避免覆盖。例如 `file.mp4` 会保存为 `file [文件标识].mp4`。
+* 备份失败项会保存到临时失败清单，使用 `ol backup retry` 可只重试失败项。
+* `ol autobackup enable` 开启自动备份后，会立即执行一次全量备份。
+* `ol autobackup cancel [@群号]` 可中途取消 `enable` 触发的首次全量备份。
+* `ol autobackup disable` 只会关闭后续自动备份；如果首次全量备份正在执行，需要另行发送 `cancel`。
 * 自动备份配置需要群主或管理员权限。
 * 当前群内备份/恢复可直接操作；如果指定 `@其他群号`，需要您是目标群的群主或管理员。
-* `/ol restore /` 支持从 OpenList 根目录恢复文件。
+* `ol restore /` 支持从 OpenList 根目录恢复文件。
 
 ---
 
@@ -368,7 +374,7 @@ AstrBot 插件要求入口类和命令注册保留在 `main.py` 中，因此重�
 
 **Q: 提示“❌ 请先配置 OpenList 连接信息”**
 
-A: 这是因为您处于“用户独立设置模式”，或全局 OpenList 地址尚未设置。请运行 `/ol config setup` 设置向导，或在 WebUI 中配置默认 OpenList 服务器地址。
+A: 这是因为您处于“用户独立设置模式”，或全局 OpenList 地址尚未设置。请运行 `ol config setup` 设置向导，或在 WebUI 中配置默认 OpenList 服务器地址。
 
 **Q: 只配置了账号密码，没有配置 Token，可以用吗？**
 
@@ -378,7 +384,7 @@ A: 可以。插件会在创建 OpenList 客户端时自动登录并获取 Token�
 
 A: AstrBot 配置会把长文本消息转换成图片，导致直链不可复制。插件会将链接写入 txt 附件发送，避免这个问题。
 
-**Q: 只发送 `/ol` 时会显示什么？**
+**Q: 只发送 `ol` 时会显示什么？**
 
 A: 插件会直接显示整理过的帮助信息，避免 AstrBot 指令组默认树形提示过长、参数类型噪声过多的问题。
 
@@ -392,11 +398,11 @@ A: 这是因为 `search` 依赖服务器的**搜索索引**，而 `ls` 是实时
 
 **Q: `/api/fs/link` 返回 403 或提示不是管理员怎么办？**
 
-A: 部分 OpenList 权限配置要求管理员才能调用真实下载链接接口。请确认插件配置的账号具有对应权限；如果只需要链接，可使用 `/ol ls 文件路径` 获取普通下载链接 txt 附件。
+A: 部分 OpenList 权限配置要求管理员才能调用真实下载链接接口。请确认插件配置的账号具有对应权限；如果只需要链接，可使用 `ol ls 文件路径` 获取普通下载链接 txt 附件。
 
 **Q: 自动备份提示“权限不足”**
 
-A: `/ol autobackup enable/disable` 需要群主或管理员权限。指定其他群号时，还需要您是目标群群主或管理员。
+A: `ol autobackup enable/disable/cancel` 需要群主或管理员权限。指定其他群号时，还需要您是目标群群主或管理员。
 
 **Q: 连接测试失败**
 
@@ -414,9 +420,9 @@ A: 请检查：
 **Bash**
 
 ```
-/ol config show    # 查看当前设置
-/ol config test    # 测试连接
-/ol ls /           # 测试文件列表
+ol config show    # 查看当前设置
+ol config test    # 测试连接
+ol ls /           # 测试文件列表
 ```
 
 ---

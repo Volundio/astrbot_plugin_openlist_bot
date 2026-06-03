@@ -366,7 +366,7 @@ class OpenlistPlugin(Star):
         default_url = global_cfg.get("openlist_url", "")
         require_auth = global_cfg.get("require_user_auth", True)
         if not default_url and not require_auth:
-            logger.warning("Openlist URL未配置，请使用 /ol config 命令配置或在WebUI中配置")
+            logger.warning("Openlist URL未配置，请使用 ol config 命令配置或在WebUI中配置")
 
     def get_user_config_manager(self, user_id: str) -> UserConfigManager:
         """获取用户配置管理器"""
@@ -566,6 +566,40 @@ class OpenlistPlugin(Star):
         elif size < 1024 * 1024 * 1024: return f"{size / (1024 * 1024):.1f}MB"
         else: return f"{size / (1024 * 1024 * 1024):.1f}GB"
 
+    def _get_wake_prefixes(self) -> List[str]:
+        """读取 AstrBot 唤醒前缀，用于识别根指令时剥离外层唤醒词。"""
+        try:
+            get_config = getattr(self.context, "get_config", None)
+            core_config = get_config() if callable(get_config) else None
+        except Exception as e:
+            logger.debug(f"读取 AstrBot 唤醒前缀失败: {e}")
+            return []
+
+        if not core_config:
+            return []
+        if isinstance(core_config, dict):
+            prefixes = core_config.get("wake_prefix", [])
+        else:
+            prefixes = getattr(core_config, "wake_prefix", [])
+            if prefixes in (None, []):
+                try:
+                    prefixes = core_config.get("wake_prefix", [])
+                except Exception:
+                    prefixes = []
+
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        elif not isinstance(prefixes, list):
+            return []
+        return sorted((str(prefix) for prefix in prefixes if str(prefix)), key=len, reverse=True)
+
+    def _strip_wake_prefix(self, message: str) -> str:
+        """从消息文本中剥离 AstrBot 配置的唤醒前缀，保留插件指令词。"""
+        for prefix in self._get_wake_prefixes():
+            if message.startswith(prefix):
+                return message[len(prefix):].strip()
+        return message
+
     def _format_usage_tip(self, title: str, usage: str, examples: List[str] = None, note: str = "") -> str:
         """生成简短、可读的命令用法提示。"""
         lines = [f"❌ {title}", "", f"用法：{usage}"]
@@ -580,12 +614,12 @@ class OpenlistPlugin(Star):
         """生成配置命令操作提示。"""
         return self._format_usage_tip(
             title,
-            "/ol config <show|setup|set|test|clear_cache>",
+            "ol config <show|setup|set|test|clear_cache>",
             [
-                "/ol config show",
-                "/ol config setup",
-                "/ol config set openlist_url http://127.0.0.1:5244",
-                "/ol config test",
+                "ol config show",
+                "ol config setup",
+                "ol config set openlist_url http://127.0.0.1:5244",
+                "ol config test",
             ],
             "set 用于修改配置项；show 用于查看当前配置。",
         )
@@ -594,12 +628,12 @@ class OpenlistPlugin(Star):
         """生成手动备份命令提示。"""
         return self._format_usage_tip(
             title,
-            "/ol backup [@群号] [/OpenList目标路径] 或 /ol backup retry",
+            "ol backup [@群号] [/OpenList目标路径] 或 ol backup retry",
             [
-                "/ol backup",
-                "/ol backup /backup/group_123456",
-                "/ol backup @123456 /backup/group_123456",
-                "/ol backup retry",
+                "ol backup",
+                "ol backup /backup/group_123456",
+                "ol backup @123456 /backup/group_123456",
+                "ol backup retry",
             ],
             "路径必须以 / 开头，群号必须以 @ 开头；私聊中备份时必须指定 @群号。",
         )
@@ -608,25 +642,26 @@ class OpenlistPlugin(Star):
         """生成自动备份命令提示。"""
         return self._format_usage_tip(
             title,
-            "/ol autobackup <show|enable|disable> [@群号] [/OpenList目标路径]",
+            "ol autobackup <show|enable|disable|cancel> [@群号] [/OpenList目标路径]",
             [
-                "/ol autobackup show",
-                "/ol autobackup enable",
-                "/ol autobackup enable @123456 /backup/group_123456",
-                "/ol autobackup disable @123456",
+                "ol autobackup show",
+                "ol autobackup enable",
+                "ol autobackup enable @123456 /backup/group_123456",
+                "ol autobackup disable @123456",
+                "ol autobackup cancel @123456",
             ],
-            "enable 可指定路径；disable 不需要路径。私聊中配置时必须指定 @群号。",
+            "enable 可指定路径；disable/cancel 不需要路径。私聊中配置时必须指定 @群号。",
         )
 
     def _format_restore_usage_tip(self, title: str = "恢复指令用法错误") -> str:
         """生成恢复命令提示。"""
         return self._format_usage_tip(
             title,
-            "/ol restore <OpenList来源路径> [@目标群号]",
+            "ol restore <OpenList来源路径> [@目标群号]",
             [
-                "/ol restore /backup/group_123456",
-                "/ol restore /docs @987654",
-                "/ol restore /",
+                "ol restore /backup/group_123456",
+                "ol restore /docs @987654",
+                "ol restore /",
             ],
             "不指定 @目标群号 时，群聊中恢复到当前群，私聊中以文件消息发送。",
         )
@@ -635,11 +670,11 @@ class OpenlistPlugin(Star):
         """生成最近附件上传命令提示。"""
         return self._format_usage_tip(
             title,
-            "先发送图片、视频或文件，再在 5 分钟内发送 /ol upload [OpenList目标目录]",
+            "先发送图片、视频或文件，再在 5 分钟内发送 ol upload [OpenList目标目录]",
             [
-                "/ol upload",
-                "/ol upload /movies",
-                "/ol upload clips",
+                "ol upload",
+                "ol upload /movies",
+                "ol upload clips",
             ],
             "只会使用同一会话、同一发送者最近 5 分钟内的最近一条附件消息。",
         )
@@ -814,13 +849,13 @@ class OpenlistPlugin(Star):
             result += f" | 📊 总计: {dirs_count} 个文件夹, {files_only_count} 个文件"
 
         result += f"\n\n💡 快速导航:"
-        result += f"\n\n   • /ol ls 序号 - 进入目录/获取链接"
-        result += f"\n\n   • /ol download 序号 - 下载并发送文件"
+        result += f"\n\n   • ol ls 序号 - 进入目录/获取链接"
+        result += f"\n\n   • ol download 序号 - 下载并发送文件"
         if not is_search_result:
-             result += f"\n\n   • /ol quit - 返回上级目录"
+             result += f"\n\n   • ol quit - 返回上级目录"
         if total_pages > 1:
-            result += f"\n   • /ol prev - ⬅️ 上一页"
-            result += f"\n   • /ol next - ➡️ 下一页"
+            result += f"\n   • ol prev - ⬅️ 上一页"
+            result += f"\n   • ol next - ➡️ 下一页"
         return result
 
     async def _download_file(self, event: AstrMessageEvent, file_item: Dict, user_config: Dict, full_path_override: str = None):
@@ -851,7 +886,7 @@ class OpenlistPlugin(Star):
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=3)
     async def remember_recent_upload_message(self, event: AstrMessageEvent):
-        """记录最近附件消息，供 /ol upload 使用。"""
+        """记录最近附件消息，供 ol upload 使用。"""
         await self.upload_service.remember_uploadable_message(event)
 
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=2)
@@ -859,9 +894,16 @@ class OpenlistPlugin(Star):
         """处理群文件上传事件（自动备份）"""
         return await self.backup_service.handle_group_file_upload(event)
 
-    async def _get_group_files_recursive(self, bot, group_id: int, folder_id: str = "/", current_path: str = "") -> List[Dict]:
+    async def _get_group_files_recursive(
+        self,
+        bot,
+        group_id: int,
+        folder_id: str = "/",
+        current_path: str = "",
+        cancel_event: Optional[asyncio.Event] = None,
+    ) -> List[Dict]:
         """递归获取群文件列表"""
-        return await self.backup_service._get_group_files_recursive(bot, group_id, folder_id, current_path)
+        return await self.backup_service._get_group_files_recursive(bot, group_id, folder_id, current_path, cancel_event)
 
     async def _backup_group_files(self, event: AstrMessageEvent, group_id: int, target_path: str, user_config: Dict):
         """执行群文件备份"""
@@ -883,9 +925,20 @@ class OpenlistPlugin(Star):
         retry_attempts: int,
         retry_delay: int,
         initial_url: str = None,
+        skip_existing: bool = True,
     ) -> tuple:
         """获取群文件 URL 并上传；失败时重新获取 URL 后重试。"""
-        return await self.backup_service._upload_group_file_with_retry(bot, client, group_id, item, target_dir, retry_attempts, retry_delay, initial_url)
+        return await self.backup_service._upload_group_file_with_retry(
+            bot,
+            client,
+            group_id,
+            item,
+            target_dir,
+            retry_attempts,
+            retry_delay,
+            initial_url,
+            skip_existing,
+        )
 
     async def _do_backup_logic(
         self,
@@ -898,16 +951,30 @@ class OpenlistPlugin(Star):
         items_override: Optional[List[Dict]] = None,
         retry_key: str = None,
         is_retry: bool = False,
+        cancel_event: Optional[asyncio.Event] = None,
+        cancel_title: str = "备份任务",
     ):
         """核心备份逻辑，支持手动和自动备份"""
-        async for result in self.backup_service._do_backup_logic(bot, event, group_id, target_path, user_config, is_auto, items_override, retry_key, is_retry):
+        async for result in self.backup_service._do_backup_logic(
+            bot,
+            event,
+            group_id,
+            target_path,
+            user_config,
+            is_auto,
+            items_override,
+            retry_key,
+            is_retry,
+            cancel_event,
+            cancel_title,
+        ):
             yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100000)
     async def handle_openlist_root_help(self, event: AstrMessageEvent):
-        """拦截 /ol 根指令，避免展示框架生成的参数树。"""
-        message = (event.message_str or "").strip()
-        if message not in ("/ol", "/网盘"):
+        """拦截 ol 根指令，避免展示框架生成的参数树。"""
+        message = self._strip_wake_prefix((event.message_str or "").strip())
+        if message not in ("ol", "网盘"):
             return
         event.stop_event()
         async for result in self.help_service.help_command(event):
@@ -922,8 +989,8 @@ class OpenlistPlugin(Star):
     async def config_command(self, event: AstrMessageEvent, action: str = "show", key: str = "", value: str = ""):
         """配置连接与插件参数。
         示例：
-          /ol config show
-          /ol config set openlist_url http://127.0.0.1:5244
+          ol config show
+          ol config set openlist_url http://127.0.0.1:5244
         """
         async for result in self.config_command_service.config_command(event, action, key, value):
             yield result
@@ -932,21 +999,21 @@ class OpenlistPlugin(Star):
     async def list_files(self, event: AstrMessageEvent, path: str = ""):
         """列出目录或获取文件链接。
         示例：
-          /ol ls /movies
-          /ol ls 2
+          ol ls /movies
+          ol ls 2
         """
         async for result in self.browse_service.list_files(event, path):
             yield result
 
     @openlist_group.command("next", alias=["下一页"])
     async def next_page(self, event: AstrMessageEvent):
-        """查看当前列表下一页。示例：/ol next"""
+        """查看当前列表下一页。示例：ol next"""
         async for result in self.browse_service.next_page(event):
             yield result
 
     @openlist_group.command("prev", alias=["上一页"])
     async def prev_page(self, event: AstrMessageEvent):
-        """查看当前列表上一页。示例：/ol prev"""
+        """查看当前列表上一页。示例：ol prev"""
         async for result in self.browse_service.prev_page(event):
             yield result
 
@@ -954,15 +1021,15 @@ class OpenlistPlugin(Star):
     async def search_files(self, event: AstrMessageEvent, keyword: str = "", path: str = "/"):
         """搜索文件。
         示例：
-          /ol search 年度报告
-          /ol search 年度报告 /docs
+          ol search 年度报告
+          ol search 年度报告 /docs
         """
         async for result in self.browse_service.search_files(event, keyword, path):
             yield result
 
     @openlist_group.command("info", alias=["信息"])
     async def file_info(self, event: AstrMessageEvent, path: str = ""):
-        """查看文件或目录信息。示例：/ol info /docs/report.pdf"""
+        """查看文件或目录信息。示例：ol info /docs/report.pdf"""
         async for result in self.browse_service.file_info(event, path):
             yield result
 
@@ -970,15 +1037,15 @@ class OpenlistPlugin(Star):
     async def get_download_link(self, event: AstrMessageEvent, path: str = ""):
         """下载并发送文件。
         示例：
-          /ol download 3
-          /ol download /docs/report.pdf
+          ol download 3
+          ol download /docs/report.pdf
         """
         async for result in self.browse_service.get_download_link(event, path):
             yield result
 
     @openlist_group.command("quit", alias=["上一级", "返回"])
     async def quit_navigation(self, event: AstrMessageEvent):
-        """返回上级目录。示例：/ol quit"""
+        """返回上级目录。示例：ol quit"""
         async for result in self.browse_service.quit_navigation(event):
             yield result
 
@@ -987,7 +1054,7 @@ class OpenlistPlugin(Star):
         """上传最近附件消息。
         示例：
           先发送图片、视频或文件
-          /ol upload /movies
+          ol upload /movies
         """
         async for result in self.upload_service.upload_command(event, target):
             yield result
@@ -996,8 +1063,8 @@ class OpenlistPlugin(Star):
     async def backup_command(self, event: AstrMessageEvent, path: str = "", group: str = ""):
         """备份群文件。
         示例：
-          /ol backup
-          /ol backup @123456 /backup/group_123456
+          ol backup
+          ol backup @123456 /backup/group_123456
         """
         async for result in self.backup_service.backup_command(event, path, group):
             yield result
@@ -1006,8 +1073,9 @@ class OpenlistPlugin(Star):
     async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", target: str = "", path: str = ""):
         """配置自动备份。
         示例：
-          /ol autobackup show
-          /ol autobackup enable @123456 /backup
+          ol autobackup show
+          ol autobackup enable @123456 /backup
+          ol autobackup cancel @123456
         """
         async for result in self.backup_service.autobackup_command(event, action, target, path):
             yield result
@@ -1016,8 +1084,8 @@ class OpenlistPlugin(Star):
     async def restore_command(self, event: AstrMessageEvent, path: str = "", target: str = ""):
         """恢复网盘文件到群或私聊。
         示例：
-          /ol restore /backup/group_123456
-          /ol restore /docs @987654
+          ol restore /backup/group_123456
+          ol restore /docs @987654
         """
         async for result in self.restore_service.restore_command(event, path, target):
             yield result
@@ -1026,8 +1094,8 @@ class OpenlistPlugin(Star):
     async def preview_command(self, event: AstrMessageEvent, path: str = ""):
         """预览文本或压缩包。
         示例：
-          /ol preview 1
-          /ol preview /data/config.txt
+          ol preview 1
+          ol preview /data/config.txt
         """
         async for result in self.preview_service.preview_command(event, path):
             yield result
@@ -1036,8 +1104,8 @@ class OpenlistPlugin(Star):
     async def remove_command(self, event: AstrMessageEvent, path: str = ""):
         """删除文件或文件夹。
         示例：
-          /ol rm 4
-          /ol rm /tmp/old.txt
+          ol rm 4
+          ol rm /tmp/stale.txt
         """
         async for result in self.browse_service.remove_command(event, path):
             yield result
@@ -1046,15 +1114,15 @@ class OpenlistPlugin(Star):
     async def mkdir_command(self, event: AstrMessageEvent, name: str = ""):
         """创建文件夹。
         示例：
-          /ol mkdir new_folder
-          /ol mkdir /data/new_dir
+          ol mkdir new_folder
+          ol mkdir /data/new_dir
         """
         async for result in self.browse_service.mkdir_command(event, name):
             yield result
 
     @openlist_group.command("help", alias=["帮助"])
     async def help_command(self, event: AstrMessageEvent):
-        """显示完整帮助。示例：/ol help"""
+        """显示完整帮助。示例：ol help"""
         async for result in self.help_service.help_command(event):
             yield result
 
