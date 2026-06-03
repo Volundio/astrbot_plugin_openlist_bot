@@ -13,11 +13,16 @@ from .base import PluginService
 class PreviewService(PluginService):
     """Preview service."""
 
-    async def preview_command(self, event: AstrMessageEvent, path: str):
+    async def preview_command(self, event: AstrMessageEvent, path: str = ""):
         """预览文件内容"""
         path = (path or "").strip()
         if not path:
-            yield event.plain_result("❌ 请提供文件路径或序号")
+            yield event.plain_result(self._format_usage_tip(
+                "缺少文件路径或序号",
+                "/ol preview <路径|序号>",
+                ["/ol preview 1", "/ol preview /data/config.txt"],
+                "支持文本文件预览和压缩包目录查看；序号来自当前会话最近一次列表。",
+            ))
             return
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)

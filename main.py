@@ -34,6 +34,7 @@ class OpenlistPlugin(Star):
         self.global_config_manager = GlobalConfigManager("openlist")
         self.cache_manager = CacheManager("openlist")
         self.user_navigation_state = {}
+        self.recent_upload_messages = {}
         self.upload_service = UploadService(self)
         self.download_service = DownloadService(self)
         self.backup_service = BackupService(self)
@@ -565,6 +566,16 @@ class OpenlistPlugin(Star):
         elif size < 1024 * 1024 * 1024: return f"{size / (1024 * 1024):.1f}MB"
         else: return f"{size / (1024 * 1024 * 1024):.1f}GB"
 
+    def _format_usage_tip(self, title: str, usage: str, examples: List[str] = None, note: str = "") -> str:
+        """生成简短、可读的命令用法提示。"""
+        lines = [f"❌ {title}", "", f"用法：{usage}"]
+        if examples:
+            lines.append("示例：")
+            lines.extend(f"  {example}" for example in examples)
+        if note:
+            lines.extend(["", f"提示：{note}"])
+        return "\n".join(lines)
+
     def _sanitize_filename(self, filename: str, fallback: str = "file") -> str:
         """生成可用于临时附件名的文件名片段。"""
         safe_name = "".join(c for c in (filename or "") if c.isalnum() or c in "._- ").strip(" .")
@@ -770,6 +781,11 @@ class OpenlistPlugin(Star):
         """后台执行群文件自动备份，避免阻塞同一条消息上的其他处理器。"""
         return await self.backup_service._run_group_file_autobackup(event, file_component, file_name, file_size, file_url, target_path, user_config, group_id, file_id, busid)
 
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=3)
+    async def remember_recent_upload_message(self, event: AstrMessageEvent):
+        """记录最近附件消息，供 /ol upload 使用。"""
+        await self.upload_service.remember_uploadable_message(event)
+
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=2)
     async def handle_group_file_upload(self, event: AstrMessageEvent):
         """处理群文件上传事件（自动备份）"""
@@ -818,6 +834,17 @@ class OpenlistPlugin(Star):
         """核心备份逻辑，支持手动和自动备份"""
         async for result in self.backup_service._do_backup_logic(bot, event, group_id, target_path, user_config, is_auto, items_override, retry_key, is_retry):
             yield result
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=10)
+    async def handle_openlist_root_help(self, event: AstrMessageEvent):
+        """拦截 /ol 根指令，避免展示框架生成的参数树。"""
+        message = (event.message_str or "").strip()
+        if message not in ("/ol", "/网盘"):
+            return
+        async for result in self.help_service.help_command(event):
+            yield result
+        event.stop_event()
+
     @filter.command_group("ol", alias=["网盘"])
     def openlist_group(self):
         """Openlist文件管理命令组"""
@@ -848,19 +875,19 @@ class OpenlistPlugin(Star):
             yield result
 
     @openlist_group.command("search", alias=["搜索"])
-    async def search_files(self, event: AstrMessageEvent, keyword: str, path: str = "/"):
+    async def search_files(self, event: AstrMessageEvent, keyword: str = "", path: str = "/"):
         """搜索文件"""
         async for result in self.browse_service.search_files(event, keyword, path):
             yield result
 
     @openlist_group.command("info", alias=["信息"])
-    async def file_info(self, event: AstrMessageEvent, path: str):
+    async def file_info(self, event: AstrMessageEvent, path: str = ""):
         """获取文件详细信息"""
         async for result in self.browse_service.file_info(event, path):
             yield result
 
     @openlist_group.command("download", alias=["下载"])
-    async def get_download_link(self, event: AstrMessageEvent, path: str):
+    async def get_download_link(self, event: AstrMessageEvent, path: str = ""):
         """直接下载指定的文件"""
         async for result in self.browse_service.get_download_link(event, path):
             yield result
@@ -873,42 +900,42 @@ class OpenlistPlugin(Star):
 
     @openlist_group.command("upload", alias=["上传"])
     async def upload_command(self, event: AstrMessageEvent, target: str = ""):
-        """上传引用消息中的文件、图片或视频"""
+        """上传最近附件消息中的文件、图片或视频"""
         async for result in self.upload_service.upload_command(event, target):
             yield result
 
     @openlist_group.command("backup", alias=["备份"])
-    async def backup_command(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
+    async def backup_command(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         """群文件备份到 Openlist"""
         async for result in self.backup_service.backup_command(event, arg1, arg2):
             yield result
 
     @openlist_group.command("autobackup", alias="自动备份")
-    async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", arg1: str = None, arg2: str = None):
+    async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", arg1: str = "", arg2: str = ""):
         """配置自动备份"""
         async for result in self.backup_service.autobackup_command(event, action, arg1, arg2):
             yield result
 
     @openlist_group.command("restore", alias=["恢复"])
-    async def restore_command(self, event: AstrMessageEvent, path: str, target: str = None):
+    async def restore_command(self, event: AstrMessageEvent, path: str = "", target: str = ""):
         """将 Openlist 路径中的文件恢复到群组或私聊"""
         async for result in self.restore_service.restore_command(event, path, target):
             yield result
 
     @openlist_group.command("preview", alias=["预览"])
-    async def preview_command(self, event: AstrMessageEvent, path: str):
+    async def preview_command(self, event: AstrMessageEvent, path: str = ""):
         """预览文件内容"""
         async for result in self.preview_service.preview_command(event, path):
             yield result
 
     @openlist_group.command("rm", alias=["删除"])
-    async def remove_command(self, event: AstrMessageEvent, path: str):
+    async def remove_command(self, event: AstrMessageEvent, path: str = ""):
         """删除文件或文件夹"""
         async for result in self.browse_service.remove_command(event, path):
             yield result
 
     @openlist_group.command("mkdir", alias=["新建"])
-    async def mkdir_command(self, event: AstrMessageEvent, name: str):
+    async def mkdir_command(self, event: AstrMessageEvent, name: str = ""):
         """创建文件夹"""
         async for result in self.browse_service.mkdir_command(event, name):
             yield result

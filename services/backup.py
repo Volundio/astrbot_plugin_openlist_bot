@@ -531,7 +531,7 @@ class BackupService(PluginService):
                 self.cache_manager.clear_cache()
             logger.info(f"✅ [自动备份] 任务结束。群 {group_id}: 成功 {success_count}, 跳过 {skipped_count}, 失败 {fail_count}")
 
-    async def backup_command(self, event: AstrMessageEvent, arg1: str = None, arg2: str = None):
+    async def backup_command(self, event: AstrMessageEvent, arg1: str = "", arg2: str = ""):
         """群文件备份到 Openlist"""
         user_id = event.get_sender_id()
         user_config = self.get_user_config(user_id)
@@ -585,7 +585,7 @@ class BackupService(PluginService):
         async for result in self._backup_group_files(event, target_group_id, target_path, user_config):
             yield result
 
-    async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", arg1: str = None, arg2: str = None):
+    async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", arg1: str = "", arg2: str = ""):
         """配置自动备份"""
         global_cfg = self.get_global_config()
         if not self._is_event_admin(event):

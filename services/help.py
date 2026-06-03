@@ -64,7 +64,7 @@ class HelpService(PluginService):
      - 示例: `/ol rm /tmp/old_file.txt`
 
 📤 `/ol upload [路径]`
-   - 回复一条包含图片、视频或文件的消息后发送本指令，即可上传被引用内容。
+   - 先发送图片、视频或文件，再在 5 分钟内发送本指令上传最近附件。
    - `/ol upload`: 上传到当前目录。
    - `/ol upload /目标目录`: 上传到指定目录。
    - `/ol upload 子目录`: 上传到当前目录下的子目录。

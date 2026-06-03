@@ -2,6 +2,7 @@ import asyncio
 import os
 import posixpath
 import re
+import time
 from typing import Dict, List, Optional
 from urllib.parse import unquote, urlparse
 
@@ -19,6 +20,8 @@ class UploadService(PluginService):
 
     CQ_SEGMENT_RE = re.compile(r"\[CQ:([a-zA-Z0-9_]+)(?:,([^\]]*))?\]")
     UPLOAD_SEGMENT_TYPES = {"file", "image", "video"}
+    RECENT_UPLOAD_TTL_SECONDS = 300
+    MAX_RECENT_UPLOAD_MESSAGES = 500
 
     async def _upload_file_with_retry(
         self,
@@ -96,62 +99,87 @@ class UploadService(PluginService):
         if isinstance(message, dict) and message.get("type"):
             return [message]
         if isinstance(message, str):
+            if "[CQ:" not in message:
+                return []
             return self._parse_cq_segments(message)
         return []
 
-    def _get_raw_message_segments(self, event: AstrMessageEvent) -> List[Dict]:
-        message_obj = getattr(event, "message_obj", None)
-        raw_message = getattr(message_obj, "raw_message", None)
-        message = self._read_value(raw_message, "message")
-        return self._normalize_message_segments(message)
-
-    def _extract_reply_message_id(self, event: AstrMessageEvent) -> Optional[str]:
-        for segment in self._get_raw_message_segments(event):
-            if segment.get("type") == "reply":
-                data = segment.get("data") or {}
-                reply_id = data.get("id") or data.get("message_id")
-                if reply_id not in (None, ""):
-                    return str(reply_id)
-
-        try:
-            components = event.get_messages()
-        except Exception:
-            components = []
-
-        for component in components or []:
-            class_name = component.__class__.__name__.lower()
-            if "reply" not in class_name:
-                continue
-            for attr in ("id", "message_id", "reply_id"):
-                value = getattr(component, attr, None)
-                if value not in (None, ""):
-                    return str(value)
-
-        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
-        for key in ("reply_id", "source_msg_id", "message_id"):
-            value = self._read_value(raw_message, key)
-            if key == "message_id":
-                continue
-            if value not in (None, ""):
-                return str(value)
-        return None
-
-    async def _get_replied_message(self, event: AstrMessageEvent, reply_id: str) -> Optional[Dict]:
-        try:
-            try:
-                message_id = int(reply_id)
-            except (TypeError, ValueError):
-                message_id = reply_id
-            result = await event.bot.api.call_action("get_msg", message_id=message_id)
-            return result if isinstance(result, dict) else None
-        except Exception as e:
-            logger.error(f"获取引用消息失败: reply_id={reply_id}, err={e}", exc_info=True)
-            return None
-
-    def _extract_upload_segments(self, replied_message: Dict) -> List[Dict]:
-        message = replied_message.get("message") if isinstance(replied_message, dict) else None
+    def _extract_upload_segments(self, message_data: Dict) -> List[Dict]:
+        message = message_data.get("message") if isinstance(message_data, dict) else None
         segments = self._normalize_message_segments(message)
         return [segment for segment in segments if segment.get("type") in self.UPLOAD_SEGMENT_TYPES]
+
+    def _prune_recent_upload_messages(self):
+        now = time.time()
+        expired_keys = [
+            key for key, cached in self.recent_upload_messages.items()
+            if now - cached.get("timestamp", 0) > self.RECENT_UPLOAD_TTL_SECONDS
+        ]
+        for key in expired_keys:
+            self.recent_upload_messages.pop(key, None)
+        overflow = len(self.recent_upload_messages) - self.MAX_RECENT_UPLOAD_MESSAGES
+        if overflow <= 0:
+            return
+        oldest_keys = sorted(
+            self.recent_upload_messages,
+            key=lambda key: self.recent_upload_messages[key].get("timestamp", 0),
+        )[:overflow]
+        for key in oldest_keys:
+            self.recent_upload_messages.pop(key, None)
+
+    def _is_self_message(self, raw_message: Dict) -> bool:
+        if self._read_value(raw_message, "post_type") == "message_sent":
+            return True
+        self_id = self._read_value(raw_message, "self_id")
+        user_id = self._read_value(raw_message, "user_id")
+        return self_id not in (None, "") and str(self_id) == str(user_id)
+
+    async def remember_uploadable_message(self, event: AstrMessageEvent):
+        """记录同会话最近的附件消息，供 /ol upload 使用。"""
+        self._prune_recent_upload_messages()
+        raw_message = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        if not isinstance(raw_message, dict):
+            return
+        if self._is_self_message(raw_message):
+            return
+
+        segments = self._normalize_message_segments(raw_message.get("message"))
+        upload_segments = [segment for segment in segments if segment.get("type") in self.UPLOAD_SEGMENT_TYPES]
+        if not upload_segments:
+            return
+
+        nav_key = self._get_navigation_state_key(event)
+        cached_message = {
+            "group_id": raw_message.get("group_id"),
+            "message_id": raw_message.get("message_id"),
+            "message": upload_segments,
+        }
+        if cached_message.get("group_id") in (None, ""):
+            group_id = self._get_event_group_id(event)
+            if group_id not in (None, ""):
+                cached_message["group_id"] = group_id
+
+        self.recent_upload_messages[nav_key] = {
+            "timestamp": time.time(),
+            "message": cached_message,
+        }
+        self._prune_recent_upload_messages()
+        logger.debug(
+            f"已记录最近可上传附件消息: session={nav_key}, "
+            f"segments={len(upload_segments)}, message_id={cached_message.get('message_id')}"
+        )
+
+    def _get_recent_upload_message(self, event: AstrMessageEvent) -> Optional[Dict]:
+        self._prune_recent_upload_messages()
+        nav_key = self._get_navigation_state_key(event)
+        cached = self.recent_upload_messages.get(nav_key)
+        if not cached:
+            return None
+        if time.time() - cached.get("timestamp", 0) > self.RECENT_UPLOAD_TTL_SECONDS:
+            self.recent_upload_messages.pop(nav_key, None)
+            return None
+        message = cached.get("message")
+        return message if isinstance(message, dict) else None
 
     def _as_int(self, value) -> Optional[int]:
         if value in (None, ""):
@@ -194,8 +222,8 @@ class UploadService(PluginService):
             return f"{safe_name}.mp4"
         return safe_name
 
-    def _get_message_group_id(self, event: AstrMessageEvent, replied_message: Dict):
-        group_id = self._read_value(replied_message, "group_id")
+    def _get_message_group_id(self, event: AstrMessageEvent, message_data: Dict):
+        group_id = self._read_value(message_data, "group_id")
         if group_id not in (None, ""):
             return group_id
         return getattr(getattr(event, "message_obj", None), "group_id", None)
@@ -215,7 +243,7 @@ class UploadService(PluginService):
             logger.warning(f"获取群文件 URL 失败: group={group_id}, file_id={file_id}, err={e}")
             return None
 
-    async def _build_upload_item(self, event: AstrMessageEvent, replied_message: Dict, segment: Dict) -> Dict:
+    async def _build_upload_item(self, event: AstrMessageEvent, message_data: Dict, segment: Dict) -> Dict:
         segment_type = segment.get("type")
         data = segment.get("data") or {}
         file_value = str(data.get("file") or "")
@@ -225,7 +253,7 @@ class UploadService(PluginService):
 
         file_id = data.get("file_id")
         busid = self._as_int(data.get("busid")) or 0
-        group_id = self._get_message_group_id(event, replied_message)
+        group_id = self._get_message_group_id(event, message_data)
         if segment_type == "file" and not source_url and file_id:
             source_url = await self._get_group_file_url(event, group_id, file_id, busid) or ""
 
@@ -276,7 +304,7 @@ class UploadService(PluginService):
             return None
 
     async def upload_command(self, event: AstrMessageEvent, target: str = ""):
-        """上传引用消息中的文件、图片或视频。"""
+        """上传最近附件消息中的文件、图片或视频。"""
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
         target = (target or "").strip()
@@ -285,20 +313,18 @@ class UploadService(PluginService):
             yield event.plain_result("❌ 请先配置Openlist连接信息\n💡 使用 /ol config setup 开始配置向导")
             return
 
-        reply_id = self._extract_reply_message_id(event)
-        if not reply_id:
-            yield event.plain_result("❌ 请回复一条包含图片、视频或文件的消息后发送 /ol upload [目标目录]")
-            return
-
         target_path = self._resolve_target_path(nav_key, target)
-        replied_message = await self._get_replied_message(event, reply_id)
-        if not replied_message:
-            yield event.plain_result("❌ 无法获取被引用消息，请确认该消息仍可被 OneBot 查询。")
+        upload_message = self._get_recent_upload_message(event)
+        if not upload_message:
+            yield event.plain_result(
+                "❌ 没有找到可上传的附件消息。\n"
+                "用法：先发送图片、视频或文件，再在 5 分钟内发送 /ol upload [目标目录]"
+            )
             return
 
-        upload_segments = self._extract_upload_segments(replied_message)
+        upload_segments = self._extract_upload_segments(upload_message)
         if not upload_segments:
-            yield event.plain_result("❌ 被引用消息中没有可上传的图片、视频或文件。")
+            yield event.plain_result("❌ 最近附件消息中没有可上传的图片、视频或文件。")
             return
 
         max_upload_size_mb = self._get_size_limit_mb(user_config, "max_upload_size", 100)
@@ -314,17 +340,17 @@ class UploadService(PluginService):
                     yield event.plain_result(f"❌ 无法访问上传目标目录: {target_path}")
                     return
 
-                yield event.plain_result(f"📤 准备上传引用消息中的 {total} 个文件\n📂 目标: {target_path}")
+                yield event.plain_result(f"📤 准备上传最近附件消息中的 {total} 个文件\n📂 目标: {target_path}")
 
                 for index, segment in enumerate(upload_segments, start=1):
-                    item = await self._build_upload_item(event, replied_message, segment)
+                    item = await self._build_upload_item(event, upload_message, segment)
                     file_name = item["name"]
                     file_size = item["size"]
                     source_url = item["url"]
 
                     if not source_url:
                         fail_count += 1
-                        yield event.plain_result(f"❌ 无法获取引用文件下载地址: {file_name}")
+                        yield event.plain_result(f"❌ 无法获取附件下载地址: {file_name}")
                         continue
 
                     if not self._is_extension_allowed(file_name, user_config):
@@ -379,10 +405,10 @@ class UploadService(PluginService):
                         yield event.plain_result(f"📁 当前目录已更新:\n\n{formatted_list}")
 
                 yield event.plain_result(
-                    f"✅ 引用上传完成!\n"
+                    f"✅ 上传完成!\n"
                     f"📊 统计: 总计 {total}, 成功 {success_count}, 失败 {fail_count}\n"
                     f"📂 目标: {target_path}"
                 )
         except Exception as e:
-            logger.error(f"用户 {user_id} 引用上传失败: {e}", exc_info=True)
+            logger.error(f"用户 {user_id} 最近附件上传失败: {e}", exc_info=True)
             yield event.plain_result(f"❌ 上传失败: {str(e)}\n💡 提示: 管理员可在后台日志中查看详细错误信息")

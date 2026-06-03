@@ -14,8 +14,17 @@ from .base import PluginService
 class RestoreService(PluginService):
     """Restore service."""
 
-    async def restore_command(self, event: AstrMessageEvent, path: str, target: str = None):
+    async def restore_command(self, event: AstrMessageEvent, path: str = "", target: str = ""):
         """将 Openlist 路径中的文件恢复到群组或私聊"""
+        path = (path or "").strip()
+        if not path:
+            yield event.plain_result(self._format_usage_tip(
+                "缺少 OpenList 来源路径",
+                "/ol restore <OpenList路径> [@目标群号]",
+                ["/ol restore /backup/group_123456", "/ol restore /docs @987654", "/ol restore /"],
+                "不指定 @目标群号 时，群聊中恢复到当前群，私聊中以文件消息发送。",
+            ))
+            return
         path = self._normalize_openlist_path(path)
         user_id = event.get_sender_id()
         user_config = self.get_user_config(user_id)

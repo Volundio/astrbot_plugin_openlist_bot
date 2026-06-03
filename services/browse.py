@@ -128,10 +128,15 @@ class BrowseService(PluginService):
         )
         yield event.plain_result(formatted_list)
 
-    async def search_files(self, event: AstrMessageEvent, keyword: str, path: str = "/"):
+    async def search_files(self, event: AstrMessageEvent, keyword: str = "", path: str = "/"):
         """搜索文件"""
         if not keyword:
-            yield event.plain_result("❌ 请提供搜索关键词")
+            yield event.plain_result(self._format_usage_tip(
+                "缺少搜索关键词",
+                "/ol search <关键词> [目录]",
+                ["/ol search 年度报告", "/ol search 年度报告 /documents"],
+                "搜索依赖 OpenList 服务器索引，结果可能不是最新。",
+            ))
             return
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
@@ -157,11 +162,16 @@ class BrowseService(PluginService):
             logger.error(f"用户 {user_id} 搜索文件失败: {e}, 关键词: {keyword}, 路径: {path}", exc_info=True)
             yield event.plain_result(f"❌ 搜索失败: {str(e)}\n💡 提示: 管理员可在后台日志中查看详细错误信息")
 
-    async def file_info(self, event: AstrMessageEvent, path: str):
+    async def file_info(self, event: AstrMessageEvent, path: str = ""):
         """获取文件详细信息"""
         path = (path or "").strip()
         if not path:
-            yield event.plain_result("❌ 请提供文件路径")
+            yield event.plain_result(self._format_usage_tip(
+                "缺少文件路径",
+                "/ol info <路径>",
+                ["/ol info /docs/report.pdf", "/ol info /movies"],
+                "info 暂不支持序号；如需查看当前列表文件，请复制列表中的路径。",
+            ))
             return
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
@@ -212,11 +222,16 @@ class BrowseService(PluginService):
             logger.error(f"用户 {user_id} 获取文件信息失败: {e}, 路径候选: {path_candidates}", exc_info=True)
             yield event.plain_result(f"❌ 操作失败: {str(e)}\n💡 提示: 管理员可在后台日志中查看详细错误信息")
 
-    async def get_download_link(self, event: AstrMessageEvent, path: str):
+    async def get_download_link(self, event: AstrMessageEvent, path: str = ""):
         """直接下载指定的文件"""
         path = (path or "").strip()
         if not path:
-            yield event.plain_result("❌ 请提供文件路径或序号")
+            yield event.plain_result(self._format_usage_tip(
+                "缺少文件路径或序号",
+                "/ol download <路径|序号>",
+                ["/ol download 2", "/ol download /movies/Inception.mkv"],
+                "序号来自当前会话最近一次 /ol ls 或 /ol search 的列表。",
+            ))
             return
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
@@ -292,11 +307,16 @@ class BrowseService(PluginService):
             logger.error(f"用户 {user_id} 回退目录失败: {e}, 目标路径: {previous_path}", exc_info=True)
             yield event.plain_result(f"❌ 回退失败: {str(e)}\n💡 提示: 管理员可在后台日志中查看详细错误信息")
 
-    async def remove_command(self, event: AstrMessageEvent, path: str):
+    async def remove_command(self, event: AstrMessageEvent, path: str = ""):
         """删除文件或文件夹"""
         path = (path or "").strip()
         if not path:
-            yield event.plain_result("❌ 请提供文件路径或序号")
+            yield event.plain_result(self._format_usage_tip(
+                "缺少要删除的路径或序号",
+                "/ol rm <路径|序号>",
+                ["/ol rm 4", "/ol rm /temp/old_file.txt"],
+                "删除操作不可恢复；序号来自当前会话最近一次列表。",
+            ))
             return
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
@@ -381,11 +401,16 @@ class BrowseService(PluginService):
             logger.error(f"用户 {user_id} 删除失败: {e}, 路径: {path}", exc_info=True)
             yield event.plain_result(f"❌ 删除失败: {str(e)}")
 
-    async def mkdir_command(self, event: AstrMessageEvent, name: str):
+    async def mkdir_command(self, event: AstrMessageEvent, name: str = ""):
         """创建文件夹"""
         name = (name or "").strip()
         if not name:
-            yield event.plain_result("❌ 请提供文件夹名称或路径")
+            yield event.plain_result(self._format_usage_tip(
+                "缺少文件夹名称或路径",
+                "/ol mkdir <名称|路径>",
+                ["/ol mkdir new_folder", "/ol mkdir /data/new_dir"],
+                "不以 / 开头时，会在当前会话的当前目录下创建。",
+            ))
             return
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)

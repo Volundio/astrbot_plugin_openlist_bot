@@ -59,10 +59,20 @@ class ConfigCommandService(PluginService):
             yield event.plain_result(setup_text)
         elif action == "set":
             if not key:
-                yield event.plain_result("❌ 请指定配置项名称")
+                yield event.plain_result(self._format_usage_tip(
+                    "缺少配置项名称",
+                    "/ol config set <配置项> <值>",
+                    ["/ol config set openlist_url http://your-server:5244", "/ol config set max_upload_size 100"],
+                    "发送 /ol config show 可以查看当前配置。",
+                ))
                 return
             if not value:
-                yield event.plain_result("❌ 请指定配置项值")
+                yield event.plain_result(self._format_usage_tip(
+                    "缺少配置项值",
+                    f"/ol config set {key} <值>",
+                    [f"/ol config set {key} 示例值"],
+                    "如需清空扩展名限制，可使用 none、clear、all 或 不限制。",
+                ))
                 return
             user_manager = self.get_user_config_manager(user_id)
             user_config = user_manager.load_config()
