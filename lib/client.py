@@ -289,7 +289,7 @@ class OpenlistClient:
             return False
 
     async def list_files(
-        self, path: str = "/", page: int = 1, per_page: int = 30
+        self, path: str = "/", page: int = 1, per_page: int = 30, refresh: bool = False
     ) -> Optional[Dict]:
         """获取文件列表"""
         result = await self._post_api_result(
@@ -299,7 +299,7 @@ class OpenlistClient:
                 "password": "",
                 "page": page,
                 "per_page": per_page,
-                "refresh": False,
+                "refresh": refresh,
             },
             "获取文件列表",
             f", 路径: {path}",

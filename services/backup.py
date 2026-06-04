@@ -168,9 +168,9 @@ class BackupService(PluginService):
             return True
         return expected_size is None or existing_size == expected_size
 
-    async def _openlist_files_by_name(self, client, target_dir: str) -> Dict[str, Dict]:
+    async def _openlist_files_by_name(self, client, target_dir: str, refresh: bool = False) -> Dict[str, Dict]:
         try:
-            list_result = await client.list_files(target_dir or "/", per_page=0)
+            list_result = await client.list_files(target_dir or "/", per_page=0, refresh=refresh)
         except Exception as e:
             logger.warning(f"检查目标目录文件列表失败: {target_dir}, err={e}")
             return {}
@@ -181,11 +181,6 @@ class BackupService(PluginService):
             if not existing.get("is_dir", False):
                 files[existing.get("name", "")] = existing
         return files
-
-    async def _openlist_file_matches(self, client, target_dir: str, file_name: str, file_size) -> bool:
-        existing_files = await self._openlist_files_by_name(client, target_dir)
-        existing = existing_files.get(file_name)
-        return bool(existing and self._existing_entry_matches(existing, file_size))
 
     def _resolve_backup_target_name(
         self,
@@ -253,7 +248,7 @@ class BackupService(PluginService):
                         }
                         target_file_name = file_name
                         if skip_existing:
-                            existing_files = await self._openlist_files_by_name(client, target_path)
+                            existing_files = await self._openlist_files_by_name(client, target_path, refresh=True)
                             existing = existing_files.get(file_name)
                             if existing and self._existing_entry_matches(existing, file_size):
                                 logger.info(f"⏭️ [自动备份] 跳过已存在文件: {target_path}/{file_name}")
@@ -279,7 +274,6 @@ class BackupService(PluginService):
                                     retry_attempts,
                                     retry_delay,
                                     initial_url=file_url,
-                                    skip_existing=skip_existing,
                                 )
                             else:
                                 logger.info(f"🚀 [自动备份] 使用 URL 流式中转: {target_file_name}, size={file_size}, target={target_path}")
@@ -512,7 +506,6 @@ class BackupService(PluginService):
         retry_attempts: int,
         retry_delay: int,
         initial_url: str = None,
-        skip_existing: bool = True,
     ) -> tuple:
         """获取群文件 URL 并上传；失败时重新获取 URL 后重试。"""
         file_id = item.get("file_id")
@@ -526,11 +519,9 @@ class BackupService(PluginService):
             upload_size = None
 
         attempts = max(1, retry_attempts)
+        reason = "URL 流式中转上传失败"
         for attempt in range(1, attempts + 1):
             try:
-                if skip_existing and await self._openlist_file_matches(client, target_dir, file_name, upload_size):
-                    logger.info(f"⏭️ [群备份] 目标文件已存在，停止重试: {target_dir}/{file_name}")
-                    return True, ""
                 if attempt == 1 and initial_url:
                     download_url = initial_url
                 else:
@@ -559,10 +550,6 @@ class BackupService(PluginService):
 
             if attempt < attempts:
                 await asyncio.sleep(max(0, retry_delay))
-
-        if skip_existing and await self._openlist_file_matches(client, target_dir, file_name, upload_size):
-            logger.info(f"⏭️ [群备份] 目标文件已存在，跳过本地临时文件备用上传: {target_dir}/{file_name}")
-            return True, ""
 
         if not file_id:
             return False, reason
@@ -596,10 +583,6 @@ class BackupService(PluginService):
                     f"备用上传本地文件大小不一致: {file_name}, actual={actual_size}, expected={upload_size}"
                 )
                 return False, "备用上传本地文件大小不一致"
-
-            if skip_existing and await self._openlist_file_matches(client, target_dir, file_name, upload_size):
-                logger.info(f"⏭️ [群备份] 目标文件已存在，跳过本地临时文件备用上传: {target_dir}/{file_name}")
-                return True, ""
 
             if await client.upload_file(temp_file_path, target_dir, file_name):
                 logger.info(f"✅ [群备份] 本地临时文件备用上传成功: {file_name} -> {target_dir}")
@@ -708,7 +691,7 @@ class BackupService(PluginService):
         if is_retry:
             logger.info(f"🔁 [群备份] 开始重试 {total} 个失败文件，目标路径: {target_path}")
         elif not is_auto:
-            yield event.plain_result(f"📦 扫描完成，共发现 {total} 个文件需要备份。\n🚀 开始备份到 Openlist: {target_path}")
+            yield event.plain_result(f"📦 扫描完成，共发现 {total} 个文件需要备份。\n📁 正在准备 OpenList 目标目录: {target_path}")
         else:
             logger.info(f"🚀 [自动备份] 发现 {total} 个新文件，准备备份到群 {group_id} 的目标路径: {target_path}")
 
@@ -724,40 +707,77 @@ class BackupService(PluginService):
 
         async with self._create_openlist_client(user_config) as client:
             semaphore = asyncio.Semaphore(3)
+            prepared_dirs = set()
+            list_failed_dirs = set()
 
             async def get_existing_files(target_dir: str) -> Dict[str, Dict]:
                 target_dir = target_dir or "/"
                 async with existing_cache_lock:
-                    if target_dir in existing_cache:
-                        return existing_cache[target_dir]
-                    list_result = await client.list_files(target_dir, per_page=0)
-                    files = {}
-                    if list_result is not None:
-                        for existing in list_result.get("content") or []:
-                            if not existing.get("is_dir", False):
-                                files[existing.get("name", "")] = existing
-                    existing_cache[target_dir] = files
-                    return files
+                    return existing_cache.get(target_dir, {})
 
-            async def existing_file_matches(target_dir: str, file_name: str, file_size) -> bool:
-                if not skip_existing:
-                    return False
-                existing_files = await get_existing_files(target_dir)
-                existing = existing_files.get(file_name)
-                if not existing:
-                    return False
-                return self._existing_entry_matches(existing, file_size)
-
-            async def remember_existing_file(target_dir: str, file_name: str, file_size):
-                if not skip_existing:
-                    return
+            async def refresh_existing_files(target_dir: str) -> Dict[str, Dict]:
                 target_dir = target_dir or "/"
+                list_result = await client.list_files(target_dir, per_page=0, refresh=True)
+                files = {}
+                if list_result is None:
+                    list_failed_dirs.add(target_dir)
+                    logger.warning(
+                        f"⚠️ [群备份] 获取目标目录文件列表失败，本轮不对该目录执行已存在跳过: {target_dir}"
+                    )
+                else:
+                    for existing in list_result.get("content") or []:
+                        if not existing.get("is_dir", False):
+                            files[existing.get("name", "")] = existing
                 async with existing_cache_lock:
-                    existing_cache.setdefault(target_dir, {})[file_name] = {
-                        "name": file_name,
-                        "size": file_size or 0,
-                        "is_dir": False,
-                    }
+                    existing_cache[target_dir] = files
+                return files
+
+            target_dirs = sorted(
+                {
+                    (self._backup_item_target(target_path, item)[0] or "/")
+                    for item in filtered_items
+                }
+            )
+            failed_dirs = set()
+            for target_dir in target_dirs:
+                if should_cancel():
+                    cancelled = True
+                    break
+                logger.info(f"📁 [群备份] 检查/创建目标目录: {target_dir}")
+                if await client.ensure_dir(target_dir):
+                    prepared_dirs.add(target_dir)
+                else:
+                    failed_dirs.add(target_dir)
+                    logger.error(f"❌ [群备份] 创建目标目录失败: {target_dir}")
+
+            if not cancelled and skip_existing:
+                for target_dir in sorted(prepared_dirs):
+                    if should_cancel():
+                        cancelled = True
+                        break
+                    await refresh_existing_files(target_dir)
+
+            upload_items = []
+            if failed_dirs:
+                for item in filtered_items:
+                    target_dir, file_name, _ = self._backup_item_target(target_path, item)
+                    target_dir = target_dir or "/"
+                    if target_dir in failed_dirs:
+                        fail_count += 1
+                        failed_item = dict(item)
+                        failed_item["_backup_fail_reason"] = f"创建目标目录失败: {target_dir}"
+                        failed_items.append(failed_item)
+                        logger.error(f"❌ [群备份] 目标目录创建失败，跳过文件: {target_dir}/{file_name}")
+                    else:
+                        upload_items.append(item)
+            else:
+                upload_items = list(filtered_items)
+
+            if not is_auto and not cancelled:
+                if upload_items:
+                    yield event.plain_result(f"📁 目标目录准备完成。\n🚀 开始备份到 Openlist: {target_path}")
+                elif failed_dirs:
+                    yield event.plain_result(f"❌ 目标目录创建失败，无法开始备份: {', '.join(sorted(failed_dirs))}")
 
             async def upload_task(item, idx):
                 nonlocal success_count, fail_count, skipped_count
@@ -774,17 +794,20 @@ class BackupService(PluginService):
                     lock_key = self._backup_item_lock_key(target_path, item)
                     target_lock = await self._acquire_target_lock(lock_key)
                     try:
-                        if not await client.ensure_dir(target_dir or target_path):
+                        target_dir = target_dir or "/"
+                        if target_dir not in prepared_dirs and not await client.ensure_dir(target_dir):
                             fail_count += 1
-                            failed_items.append(dict(item))
+                            failed_item = dict(item)
+                            failed_item["_backup_fail_reason"] = f"创建目标目录失败: {target_dir}"
+                            failed_items.append(failed_item)
                             return
 
                         if should_cancel():
                             return
 
-                        target_dir = target_dir or "/"
                         existing_files = await get_existing_files(target_dir)
-                        if skip_existing:
+                        can_check_existing = skip_existing and target_dir not in list_failed_dirs
+                        if can_check_existing:
                             existing = existing_files.get(file_name)
                             if existing and self._existing_entry_matches(existing, item.get("file_size")):
                                 skipped_count += 1
@@ -811,7 +834,12 @@ class BackupService(PluginService):
                         if should_cancel():
                             return
 
-                        if await existing_file_matches(target_dir, file_name, item.get("file_size")):
+                        resolved_existing = existing_files.get(file_name)
+                        if (
+                            can_check_existing
+                            and resolved_existing
+                            and self._existing_entry_matches(resolved_existing, item.get("file_size"))
+                        ):
                             skipped_count += 1
                             logger.info(f"⏭️ [群备份] 跳过已存在文件: {target_dir}/{file_name}")
                             return
@@ -824,11 +852,9 @@ class BackupService(PluginService):
                             target_dir,
                             retry_attempts,
                             retry_delay,
-                            skip_existing=skip_existing,
                         )
                         if up_res:
                             success_count += 1
-                            await remember_existing_file(target_dir, file_name, item.get("file_size"))
                         else:
                             fail_count += 1
                             failed_item = dict(item)
@@ -873,14 +899,15 @@ class BackupService(PluginService):
                     await asyncio.gather(cancel_waiter, return_exceptions=True)
 
             batch_size = 5
-            for i in range(0, total, batch_size):
+            for i in range(0, len(upload_items), batch_size):
                 if should_cancel():
                     cancelled = True
                     break
-                batch_tasks = [upload_task(item, j) for j, item in enumerate(filtered_items[i:i+batch_size], start=i)]
+                batch_tasks = [upload_task(item, j) for j, item in enumerate(upload_items[i:i+batch_size], start=i)]
                 await run_batch(batch_tasks)
+                processed_count = min(total, success_count + skipped_count + fail_count)
                 logger.info(
-                    f"⏳ 备份进度: {min(i+batch_size, total)}/{total} "
+                    f"⏳ 备份进度: {processed_count}/{total} "
                     f"(成功: {success_count}, 跳过: {skipped_count}, 失败: {fail_count})"
                 )
                 if cancelled or should_cancel():

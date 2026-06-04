@@ -306,7 +306,9 @@ ol restore /backup/folder
 * `ol backup` 未指定路径时使用 `backup_default_path`。
 * `ol backup` 支持 `@群号` 和 `/目标路径` 两个参数，顺序不限。
 * `backup_default_path`、`autobackup_default_path` 支持 `{group_id}`、`{gid}`、`{group}` 占位符。
+* 开始上传前会先检查并创建本轮备份涉及的 OpenList 目标目录。
 * 备份默认只会跳过同目录中同名且大小一致的文件，不会跨目录检查重复文件。
+* 判断已存在文件时会刷新 OpenList 目标目录；如果目录列表获取失败，本轮该目录不会反复请求列表，会跳过已存在检测并继续备份。
 * 同目录同名但大小不同的文件会自动改名备份，避免覆盖。例如 `file.mp4` 会保存为 `file [文件标识].mp4`。
 * 群文件 URL 流式中转多次失败后，会改用本地临时文件备用上传：先完整下载到 `backup_temp`，校验大小后再上传；无论成功或失败，都会清理临时文件。
 * 备份失败项会保存到临时失败清单，使用 `ol backup retry` 可只重试失败项。
