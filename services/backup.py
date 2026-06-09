@@ -14,6 +14,8 @@ from .base import PluginService
 class BackupService(PluginService):
     """Backup service."""
 
+    GROUP_FILE_LIST_COUNT = 10000
+
     def __init__(self, plugin):
         super().__init__(plugin)
         self._target_locks = {}
@@ -35,6 +37,69 @@ class BackupService(PluginService):
 
     def _backup_item_source_name(self, item: Dict) -> str:
         return item.get("file_name") or item.get("name") or ""
+
+    def _short_backup_fail_reason(self, reason, limit: int = 140) -> str:
+        text = str(reason or "未知原因").replace("\n", " ").strip()
+        if "wording='" in text:
+            text = text.split("wording='", 1)[1].split("'", 1)[0]
+        elif "message='" in text:
+            text = text.split("message='", 1)[1].split("'", 1)[0]
+        if len(text) > limit:
+            text = text[: limit - 3] + "..."
+        return text or "未知原因"
+
+    def _format_failed_backup_items(self, failed_items: List[Dict], limit: int = 10) -> str:
+        if not failed_items:
+            return ""
+        lines = ["", "❌ 失败文件:"]
+        for index, item in enumerate(failed_items[:limit], start=1):
+            file_name = item.get("_backup_target_name") or self._backup_item_source_name(item) or "未知文件"
+            reason = self._short_backup_fail_reason(item.get("_backup_fail_reason"))
+            lines.append(f"{index}. {file_name}")
+            lines.append(f"   原因: {reason}")
+        remaining = len(failed_items) - limit
+        if remaining > 0:
+            lines.append(f"... 其余 {remaining} 个失败文件已保存，可使用 ol backup retry 重试。")
+        return "\n".join(lines)
+
+    def _is_permanent_group_file_error(self, reason: str) -> bool:
+        text = str(reason or "")
+        return "文件不存在" in text or "code=-103" in text
+
+    def _format_backup_scan_summary(self, stats: Dict) -> str:
+        raw_count = stats.get("raw_count", 0)
+        reported_count = stats.get("reported_count")
+        filtered_count = stats.get("filtered_count", raw_count)
+        deduped_count = stats.get("deduped_count", filtered_count)
+        ext_skipped = stats.get("ext_skipped", 0)
+        size_skipped = stats.get("size_skipped", 0)
+        duplicate_skipped = stats.get("duplicate_skipped", 0)
+
+        lines = [
+            f"📦 扫描完成，接口返回 {raw_count} 个群文件。",
+        ]
+        if reported_count is not None and reported_count != raw_count:
+            lines.append(f"📊 群文件系统统计: {reported_count} 个。")
+        if ext_skipped or size_skipped:
+            lines.append(
+                f"🔎 过滤: 后缀跳过 {ext_skipped}，大小跳过 {size_skipped}，剩余 {filtered_count}。"
+            )
+        if duplicate_skipped:
+            lines.append(f"⏭️ 去重: 跳过 {duplicate_skipped} 个同目录重复记录。")
+        lines.append(f"📁 需要备份 {deduped_count} 个文件，正在准备 OpenList 目标目录: {stats.get('target_path', '')}")
+        return "\n".join(lines)
+
+    async def _get_group_file_system_count(self, bot, group_id: int) -> Optional[int]:
+        try:
+            res = await bot.api.call_action("get_group_file_system_info", group_id=group_id)
+            if not isinstance(res, dict):
+                return None
+            count = self._to_int_or_none(res.get("file_count"))
+            logger.info(f"🔍 [群备份] 群 {group_id} 文件系统信息: {res}")
+            return count
+        except Exception as e:
+            logger.warning(f"获取群 {group_id} 文件系统信息失败: {e}")
+            return None
 
     def _backup_item_target(self, target_path: str, item: Dict, use_override: bool = True) -> tuple:
         source_name = self._backup_item_source_name(item)
@@ -414,15 +479,28 @@ class BackupService(PluginService):
                 return all_files
 
             if folder_id == "/":
-                res = await bot.api.call_action("get_group_root_files", group_id=group_id)
+                res = await bot.api.call_action(
+                    "get_group_root_files",
+                    group_id=group_id,
+                    file_count=self.GROUP_FILE_LIST_COUNT,
+                )
             else:
-                res = await bot.api.call_action("get_group_files_by_folder", group_id=group_id, folder_id=folder_id)
+                res = await bot.api.call_action(
+                    "get_group_files_by_folder",
+                    group_id=group_id,
+                    folder_id=folder_id,
+                    file_count=self.GROUP_FILE_LIST_COUNT,
+                )
 
             if not res:
                 return []
 
             files = res.get("files", [])
             folders = res.get("folders", [])
+            logger.info(
+                f"🔍 [群备份] 群 {group_id} 目录 {current_path or '/'} "
+                f"返回文件 {len(files)} 个，子目录 {len(folders)} 个，file_count={self.GROUP_FILE_LIST_COUNT}"
+            )
 
             for f in files:
                 if cancel_event and cancel_event.is_set():
@@ -511,7 +589,6 @@ class BackupService(PluginService):
         file_id = item.get("file_id")
         file_name = item.get("_backup_target_name") or item.get("file_name")
         busid = item.get("busid", 0)
-        temp_file_path = None
         upload_size = item.get("file_size")
         try:
             upload_size = int(upload_size) if upload_size is not None else None
@@ -545,8 +622,8 @@ class BackupService(PluginService):
                     reason = "URL 流式中转上传失败"
                     logger.warning(f"备份文件 {file_name} 第 {attempt}/{attempts} 次失败: {reason}")
             except Exception as e:
-                reason = str(e)
-                logger.error(f"备份文件 {file_name} 第 {attempt}/{attempts} 次异常: {e}", exc_info=True)
+                reason = self._short_backup_fail_reason(e)
+                logger.error(f"备份文件 {file_name} 第 {attempt}/{attempts} 次异常: {reason}", exc_info=True)
 
             if attempt < attempts:
                 await asyncio.sleep(max(0, retry_delay))
@@ -554,53 +631,80 @@ class BackupService(PluginService):
         if not file_id:
             return False, reason
 
-        try:
-            logger.info(
-                f"🧰 [群备份] URL 流式中转 {attempts} 次失败，改用本地临时文件备用上传: "
-                f"{file_name}, target={target_dir}"
+        if self._is_permanent_group_file_error(reason):
+            logger.warning(
+                f"⏭️ [群备份] 群文件已不存在，跳过本地临时文件备用上传: {file_name}, reason={reason}"
             )
-            url_res = await bot.api.call_action(
-                "get_group_file_url",
-                group_id=group_id,
-                file_id=file_id,
-                busid=busid,
+            return False, reason
+
+        logger.info(
+            f"🧰 [群备份] URL 流式中转 {attempts} 次失败，改用本地临时文件备用上传: "
+            f"{file_name}, target={target_dir}"
+        )
+        temp_dir = os.path.join(StarTools.get_data_dir("openlist"), "backup_temp")
+        os.makedirs(temp_dir, exist_ok=True)
+        safe_filename = self._sanitize_filename(file_name, "backup")
+
+        for fallback_attempt in range(1, attempts + 1):
+            temp_file_path = os.path.join(
+                temp_dir,
+                f"backup_{group_id}_{self._unique_suffix()}_{safe_filename}",
             )
-            fallback_url = url_res.get("url") if isinstance(url_res, dict) else None
-            if not fallback_url:
-                return False, "备用上传无法获取群文件下载 URL"
-
-            temp_dir = os.path.join(StarTools.get_data_dir("openlist"), "backup_temp")
-            os.makedirs(temp_dir, exist_ok=True)
-            safe_filename = self._sanitize_filename(file_name, "backup")
-            temp_file_path = os.path.join(temp_dir, f"backup_{group_id}_{self._unique_suffix()}_{safe_filename}")
-
-            if not await client.download_url_to_file(fallback_url, temp_file_path, file_name, upload_size):
-                return False, "备用上传本地下载失败"
-
-            actual_size = os.path.getsize(temp_file_path)
-            if upload_size is not None and upload_size > 0 and actual_size != upload_size:
-                logger.error(
-                    f"备用上传本地文件大小不一致: {file_name}, actual={actual_size}, expected={upload_size}"
+            try:
+                url_res = await bot.api.call_action(
+                    "get_group_file_url",
+                    group_id=group_id,
+                    file_id=file_id,
+                    busid=busid,
                 )
-                return False, "备用上传本地文件大小不一致"
+                fallback_url = url_res.get("url") if isinstance(url_res, dict) else None
+                if not fallback_url:
+                    reason = "备用上传无法获取群文件下载 URL"
+                    logger.warning(
+                        f"备用上传文件 {file_name} 第 {fallback_attempt}/{attempts} 次失败: {reason}"
+                    )
+                else:
+                    logger.info(
+                        f"🧰 [群备份] 本地临时文件备用上传: {file_name}, "
+                        f"attempt={fallback_attempt}/{attempts}"
+                    )
+                    if not await client.download_url_to_file(fallback_url, temp_file_path, file_name, upload_size):
+                        reason = "备用上传本地下载失败"
+                        logger.warning(
+                            f"备用上传文件 {file_name} 第 {fallback_attempt}/{attempts} 次失败: {reason}"
+                        )
+                    else:
+                        actual_size = os.path.getsize(temp_file_path)
+                        if upload_size is not None and upload_size > 0 and actual_size != upload_size:
+                            reason = "备用上传本地文件大小不一致"
+                            logger.error(
+                                f"{reason}: {file_name}, actual={actual_size}, expected={upload_size}"
+                            )
+                        elif await client.upload_file(temp_file_path, target_dir, file_name):
+                            logger.info(f"✅ [群备份] 本地临时文件备用上传成功: {file_name} -> {target_dir}")
+                            return True, ""
+                        else:
+                            reason = "备用上传 OpenList 上传失败"
+                            logger.warning(
+                                f"备用上传文件 {file_name} 第 {fallback_attempt}/{attempts} 次失败: {reason}"
+                            )
+            except Exception as e:
+                reason = self._short_backup_fail_reason(e)
+                logger.error(
+                    f"备用上传文件 {file_name} 第 {fallback_attempt}/{attempts} 次异常: {reason}",
+                    exc_info=True,
+                )
+            finally:
+                cleanup_paths = [temp_file_path, f"{temp_file_path}.part"]
+                for cleanup_path in cleanup_paths:
+                    if cleanup_path and os.path.exists(cleanup_path):
+                        try:
+                            os.remove(cleanup_path)
+                        except OSError as e:
+                            logger.warning(f"清理备份备用上传临时文件失败: {cleanup_path}, err={e}")
 
-            if await client.upload_file(temp_file_path, target_dir, file_name):
-                logger.info(f"✅ [群备份] 本地临时文件备用上传成功: {file_name} -> {target_dir}")
-                return True, ""
-            return False, "备用上传 OpenList 上传失败"
-        except Exception as e:
-            logger.error(f"备用上传文件 {file_name} 失败: {e}", exc_info=True)
-            return False, str(e)
-        finally:
-            cleanup_paths = []
-            if temp_file_path:
-                cleanup_paths.extend([temp_file_path, f"{temp_file_path}.part"])
-            for cleanup_path in cleanup_paths:
-                if cleanup_path and os.path.exists(cleanup_path):
-                    try:
-                        os.remove(cleanup_path)
-                    except OSError as e:
-                        logger.warning(f"清理备份备用上传临时文件失败: {cleanup_path}, err={e}")
+            if fallback_attempt < attempts:
+                await asyncio.sleep(max(0, retry_delay))
 
         return False, reason
 
@@ -629,7 +733,13 @@ class BackupService(PluginService):
 
         if items_override is not None:
             filtered_items = list(items_override)
+            scan_stats = {
+                "raw_count": len(filtered_items),
+                "filtered_count": len(filtered_items),
+                "target_path": target_path,
+            }
         else:
+            reported_count = await self._get_group_file_system_count(bot, group_id)
             all_items = await self._get_group_files_recursive(bot, group_id, cancel_event=cancel_event)
             if should_cancel():
                 if not is_auto:
@@ -651,6 +761,8 @@ class BackupService(PluginService):
             max_size = max_size_mb * 1024 * 1024 if max_size_mb > 0 else 0
 
             filtered_items = []
+            ext_skipped = 0
+            size_skipped = 0
             for item in all_items:
                 name = item.get("file_name", "").lower()
                 size = self._to_int_or_none(item.get("file_size"))
@@ -658,15 +770,34 @@ class BackupService(PluginService):
                 if allowed_exts:
                     ext = os.path.splitext(name)[1]
                     if ext not in allowed_exts:
+                        ext_skipped += 1
                         continue
 
                 if max_size > 0 and size is not None and size > max_size:
+                    size_skipped += 1
                     continue
 
                 filtered_items.append(item)
 
+            scan_stats = {
+                "raw_count": len(all_items),
+                "filtered_count": len(filtered_items),
+                "ext_skipped": ext_skipped,
+                "size_skipped": size_skipped,
+                "target_path": target_path,
+                "reported_count": reported_count,
+            }
+            logger.info(
+                f"🔍 [群备份] 扫描统计: group={group_id}, raw={len(all_items)}, "
+                f"reported={reported_count}, "
+                f"ext_skipped={ext_skipped}, size_skipped={size_skipped}, filtered={len(filtered_items)}, "
+                f"backup_allowed_extensions={allowed_exts or '不限制'}, backup_max_size={max_size_mb}MB"
+            )
+
         original_count = len(filtered_items)
         filtered_items = self._deduplicate_backup_items(filtered_items, target_path)
+        scan_stats["deduped_count"] = len(filtered_items)
+        scan_stats["duplicate_skipped"] = original_count - len(filtered_items)
         if original_count != len(filtered_items):
             logger.info(f"⏭️ [群备份] 已去重 {original_count - len(filtered_items)} 个重复群文件记录。")
 
@@ -691,7 +822,7 @@ class BackupService(PluginService):
         if is_retry:
             logger.info(f"🔁 [群备份] 开始重试 {total} 个失败文件，目标路径: {target_path}")
         elif not is_auto:
-            yield event.plain_result(f"📦 扫描完成，共发现 {total} 个文件需要备份。\n📁 正在准备 OpenList 目标目录: {target_path}")
+            yield event.plain_result(self._format_backup_scan_summary(scan_stats))
         else:
             logger.info(f"🚀 [自动备份] 发现 {total} 个新文件，准备备份到群 {group_id} 的目标路径: {target_path}")
 
@@ -788,7 +919,9 @@ class BackupService(PluginService):
                     original_target_dir, original_file_name, _ = self._backup_item_target(target_path, item, use_override=False)
                     if not file_name:
                         fail_count += 1
-                        failed_items.append(dict(item))
+                        failed_item = dict(item)
+                        failed_item["_backup_fail_reason"] = "文件名为空"
+                        failed_items.append(failed_item)
                         return
 
                     lock_key = self._backup_item_lock_key(target_path, item)
@@ -858,13 +991,14 @@ class BackupService(PluginService):
                         else:
                             fail_count += 1
                             failed_item = dict(item)
-                            failed_item["_backup_fail_reason"] = reason
+                            failed_item["_backup_fail_reason"] = self._short_backup_fail_reason(reason)
                             failed_items.append(failed_item)
                     except Exception as e:
-                        logger.error(f"备份文件 {file_name} 失败: {e}")
+                        reason = self._short_backup_fail_reason(e)
+                        logger.error(f"备份文件 {file_name} 失败: {reason}", exc_info=True)
                         fail_count += 1
                         failed_item = dict(item)
-                        failed_item["_backup_fail_reason"] = str(e)
+                        failed_item["_backup_fail_reason"] = reason
                         failed_items.append(failed_item)
                     finally:
                         await self._release_target_lock(lock_key, target_lock)
@@ -920,11 +1054,13 @@ class BackupService(PluginService):
             processed_count = success_count + skipped_count + fail_count
             remaining_count = max(0, total - processed_count)
             if not is_auto:
+                failed_list = self._format_failed_backup_items(failed_items)
                 yield event.plain_result(
                     f"🛑 {cancel_title}已取消\n"
                     f"📊 已处理: 总计 {total}, 成功 {success_count}, 跳过 {skipped_count}, "
                     f"失败 {fail_count}, 未处理 {remaining_count}\n"
                     f"📂 目标: {target_path}"
+                    f"{failed_list}"
                 )
             else:
                 logger.info(
@@ -950,10 +1086,12 @@ class BackupService(PluginService):
                 else:
                     self._delete_backup_retry_state(retry_key)
             retry_hint = "\n💡 发送 ol backup retry 可只重试失败项。" if failed_items else ""
+            failed_list = self._format_failed_backup_items(failed_items)
             yield event.plain_result(
                 f"✅ 备份任务结束!\n"
                 f"📊 统计: 总计 {total}, 成功 {success_count}, 跳过 {skipped_count}, 失败 {fail_count}\n"
                 f"📂 目标: {target_path}"
+                f"{failed_list}"
                 f"{retry_hint}"
             )
         else:
