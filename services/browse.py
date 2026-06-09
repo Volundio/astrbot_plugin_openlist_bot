@@ -36,7 +36,7 @@ class BrowseService(PluginService):
                     target_path = self._get_item_full_path(nav_key, item, user_config)
                     path_candidates = [target_path]
                 else:
-                    async for result in self._get_and_send_download_link(event, item, user_config):
+                    async for result in self.download_service._get_and_send_download_link(event, item, user_config):
                         yield result
                     return
             else:
@@ -56,7 +56,7 @@ class BrowseService(PluginService):
                 for candidate_path in path_candidates:
                     file_info = await client.get_file_info(candidate_path)
                     if file_info and not file_info.get("is_dir", False):
-                        async for result in self._get_and_send_download_link(event, file_info, user_config, full_path=candidate_path):
+                        async for result in self.download_service._get_and_send_download_link(event, file_info, user_config, full_path=candidate_path):
                             yield result
                         return
 
@@ -337,7 +337,7 @@ class BrowseService(PluginService):
 
         if item_to_download:
             yield event.plain_result(f"📥 正在准备下载文件: {item_to_download.get('name', '')}...")
-            async for result in self._download_file(event, item_to_download, user_config, full_path_override=full_path_override):
+            async for result in self.download_service._download_file(event, item_to_download, user_config, full_path_override=full_path_override):
                 yield result
 
     async def quit_navigation(self, event: AstrMessageEvent):

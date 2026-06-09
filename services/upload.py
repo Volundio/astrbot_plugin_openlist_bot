@@ -10,7 +10,6 @@ import aiohttp
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import StarTools
 
 from ..lib.client import OpenlistClient
 from .base import PluginService
@@ -70,52 +69,20 @@ class UploadService(PluginService):
             if attempt < attempts:
                 await asyncio.sleep(retry_delay)
 
-        if callable(refresh_url):
-            try:
-                refreshed_url = await refresh_url()
-                if refreshed_url:
-                    current_url = refreshed_url
-            except Exception as e:
-                logger.warning(f"备用上传前刷新上传 URL 失败: {file_name}, err={e}")
-
-        if not current_url:
-            return False
-
-        temp_file_path = None
-        try:
-            logger.info(f"🧰 URL 中转上传 {file_name} {attempts} 次失败，改用本地临时文件备用上传。")
-            temp_dir = os.path.join(StarTools.get_data_dir("openlist"), "upload_temp")
-            os.makedirs(temp_dir, exist_ok=True)
-            safe_filename = self._sanitize_filename(file_name, "upload")
-            temp_file_path = os.path.join(temp_dir, f"upload_{self._unique_suffix()}_{safe_filename}")
-
-            if not await client.download_url_to_file(current_url, temp_file_path, file_name, file_size):
-                return False
-
-            actual_size = os.path.getsize(temp_file_path)
-            if file_size is not None and file_size > 0 and actual_size != file_size:
-                logger.error(
-                    f"备用上传本地文件大小不一致: {file_name}, actual={actual_size}, expected={file_size}"
-                )
-                return False
-
-            if await client.upload_file(temp_file_path, target_path, file_name):
-                logger.info(f"✅ 本地临时文件备用上传成功: {file_name} -> {target_path}")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"本地临时文件备用上传失败: {file_name}, err={e}", exc_info=True)
-            return False
-        finally:
-            cleanup_paths = []
-            if temp_file_path:
-                cleanup_paths.extend([temp_file_path, f"{temp_file_path}.part"])
-            for cleanup_path in cleanup_paths:
-                if cleanup_path and os.path.exists(cleanup_path):
-                    try:
-                        os.remove(cleanup_path)
-                    except OSError as e:
-                        logger.warning(f"清理上传备用临时文件失败: {cleanup_path}, err={e}")
+        logger.info(f"🧰 URL 中转上传 {file_name} {attempts} 次失败，改用本地临时文件备用上传。")
+        success, _ = await self._upload_url_via_temp_file(
+            client,
+            current_url,
+            target_path,
+            file_name,
+            file_size,
+            temp_dir_name="upload_temp",
+            temp_prefix="upload",
+            attempts=1,
+            retry_delay=retry_delay,
+            refresh_url=refresh_url,
+        )
+        return success
 
     def _cq_unescape(self, value: str) -> str:
         return (

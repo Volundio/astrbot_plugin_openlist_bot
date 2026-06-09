@@ -172,30 +172,6 @@ class OpenlistPlugin(Star):
             self._get_positive_int_config(user_config, f"{prefix}_retry_delay", 5, minimum=0),
         )
 
-    async def _upload_file_with_retry(
-        self,
-        client: OpenlistClient,
-        file_path: str,
-        target_path: str,
-        file_name: str,
-        user_config: Dict,
-    ) -> bool:
-        """本地文件上传自动重试。"""
-        return await self.upload_service._upload_file_with_retry(client, file_path, target_path, file_name, user_config)
-
-    async def _upload_url_stream_with_retry(
-        self,
-        client: OpenlistClient,
-        source_url: str,
-        target_path: str,
-        file_name: str,
-        file_size: Optional[int],
-        user_config: Dict,
-        refresh_url=None,
-    ) -> bool:
-        """URL 中转上传自动重试；可在重试时刷新平台文件 URL。"""
-        return await self.upload_service._upload_url_stream_with_retry(client, source_url, target_path, file_name, file_size, user_config, refresh_url)
-
     def _get_extension_filter(self, user_config: Dict, key: str = "allowed_extensions") -> List[str]:
         """读取扩展名过滤配置；空列表表示不限制。"""
         value = user_config.get(key, [])
@@ -858,32 +834,6 @@ class OpenlistPlugin(Star):
             result += f"\n   • ol next - ➡️ 下一页"
         return result
 
-    async def _download_file(self, event: AstrMessageEvent, file_item: Dict, user_config: Dict, full_path_override: str = None):
-        """下载文件并作为附件发送给用户"""
-        async for result in self.download_service._download_file(event, file_item, user_config, full_path_override):
-            yield result
-
-    async def _get_and_send_download_link(self, event: AstrMessageEvent, item: Dict, user_config: Dict, full_path: str = None):
-        """获取指定项目的文件链接并发送"""
-        async for result in self.download_service._get_and_send_download_link(event, item, user_config, full_path):
-            yield result
-
-    async def _run_group_file_autobackup(
-        self,
-        event: AstrMessageEvent,
-        file_component: File,
-        file_name: str,
-        file_size: Optional[int],
-        file_url: str,
-        target_path: str,
-        user_config: Dict,
-        group_id: str,
-        file_id: str = None,
-        busid: int = 0,
-    ) -> None:
-        """后台执行群文件自动备份，避免阻塞同一条消息上的其他处理器。"""
-        return await self.backup_service._run_group_file_autobackup(event, file_component, file_name, file_size, file_url, target_path, user_config, group_id, file_id, busid)
-
     @filter.event_message_type(filter.EventMessageType.ALL, priority=3)
     async def remember_recent_upload_message(self, event: AstrMessageEvent):
         """记录最近附件消息，供 ol upload 使用。"""
@@ -893,82 +843,6 @@ class OpenlistPlugin(Star):
     async def handle_group_file_upload(self, event: AstrMessageEvent):
         """处理群文件上传事件（自动备份）"""
         return await self.backup_service.handle_group_file_upload(event)
-
-    async def _get_group_files_recursive(
-        self,
-        bot,
-        group_id: int,
-        folder_id: str = "/",
-        current_path: str = "",
-        cancel_event: Optional[asyncio.Event] = None,
-    ) -> List[Dict]:
-        """递归获取群文件列表"""
-        return await self.backup_service._get_group_files_recursive(bot, group_id, folder_id, current_path, cancel_event)
-
-    async def _backup_group_files(self, event: AstrMessageEvent, group_id: int, target_path: str, user_config: Dict):
-        """执行群文件备份"""
-        async for result in self.backup_service._backup_group_files(event, group_id, target_path, user_config):
-            yield result
-
-    async def _retry_last_backup(self, event: AstrMessageEvent, user_config: Dict):
-        """重试最近一次手动备份失败项。"""
-        async for result in self.backup_service._retry_last_backup(event, user_config):
-            yield result
-
-    async def _upload_group_file_with_retry(
-        self,
-        bot,
-        client,
-        group_id: int,
-        item: Dict,
-        target_dir: str,
-        retry_attempts: int,
-        retry_delay: int,
-        initial_url: str = None,
-        skip_existing: bool = True,
-    ) -> tuple:
-        """获取群文件 URL 并上传；失败时重新获取 URL 后重试。"""
-        return await self.backup_service._upload_group_file_with_retry(
-            bot,
-            client,
-            group_id,
-            item,
-            target_dir,
-            retry_attempts,
-            retry_delay,
-            initial_url,
-            skip_existing,
-        )
-
-    async def _do_backup_logic(
-        self,
-        bot,
-        event: AstrMessageEvent,
-        group_id: int,
-        target_path: str,
-        user_config: Dict,
-        is_auto: bool = False,
-        items_override: Optional[List[Dict]] = None,
-        retry_key: str = None,
-        is_retry: bool = False,
-        cancel_event: Optional[asyncio.Event] = None,
-        cancel_title: str = "备份任务",
-    ):
-        """核心备份逻辑，支持手动和自动备份"""
-        async for result in self.backup_service._do_backup_logic(
-            bot,
-            event,
-            group_id,
-            target_path,
-            user_config,
-            is_auto,
-            items_override,
-            retry_key,
-            is_retry,
-            cancel_event,
-            cancel_title,
-        ):
-            yield result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100000)
     async def handle_openlist_root_help(self, event: AstrMessageEvent):

@@ -14,6 +14,27 @@ from .base import PluginService
 class RestoreService(PluginService):
     """Restore service."""
 
+    async def _get_group_root_folders(self, event: AstrMessageEvent, group_id: int) -> dict:
+        """Return root group-file folders keyed by folder name."""
+        folders = {}
+        try:
+            root_files = await event.bot.api.call_action(
+                "get_group_root_files",
+                group_id=group_id,
+                file_count=self.GROUP_FILE_LIST_COUNT,
+            )
+        except Exception as e:
+            logger.warning(f"获取群根目录文件夹列表失败: {e}")
+            return folders
+
+        if isinstance(root_files, dict):
+            for folder in root_files.get("folders") or []:
+                folder_name = folder.get("folder_name")
+                folder_id = folder.get("folder_id")
+                if folder_name and folder_id:
+                    folders[folder_name] = folder_id
+        return folders
+
     async def restore_command(self, event: AstrMessageEvent, path: str = "", target: str = ""):
         """将 Openlist 路径中的文件恢复到群组或私聊"""
         path = (path or "").strip()
@@ -115,13 +136,7 @@ class RestoreService(PluginService):
 
                 # 如果是群组，预先获取根目录下的文件夹，避免重复创建并获取正确的 ID
                 if is_group:
-                    try:
-                        root_files = await event.bot.api.call_action("get_group_root_files", group_id=target_group_id)
-                        if root_files and "folders" in root_files:
-                            for f in root_files["folders"]:
-                                created_folders[f["folder_name"]] = f["folder_id"]
-                    except Exception as e:
-                        logger.warning(f"获取群根目录文件列表失败: {e}")
+                    created_folders.update(await self._get_group_root_folders(event, target_group_id))
 
                 success_count = 0
                 fail_count = 0
@@ -214,24 +229,13 @@ class RestoreService(PluginService):
                                         await event.bot.api.call_action("create_group_file_folder", group_id=target_group_id, folder_name=folder_name)
 
                                         # 创建后刷新列表以获取 ID
-                                        root_files = await event.bot.api.call_action("get_group_root_files", group_id=target_group_id)
-                                        if root_files and "folders" in root_files:
-                                            for f in root_files["folders"]:
-                                                if f["folder_name"] == folder_name:
-                                                    created_folders[folder_name] = f["folder_id"]
-                                                    break
+                                        created_folders.update(await self._get_group_root_folders(event, target_group_id))
                                     except Exception as e:
                                         # 可能是文件夹已存在，尝试从列表匹配
-                                        try:
-                                            root_files = await event.bot.api.call_action("get_group_root_files", group_id=target_group_id)
-                                            if root_files and "folders" in root_files:
-                                                for f in root_files["folders"]:
-                                                    if f["folder_name"] == folder_name:
-                                                        created_folders[folder_name] = f["folder_id"]
-                                                        break
-                                        except Exception as lookup_error:
+                                        created_folders.update(await self._get_group_root_folders(event, target_group_id))
+                                        if folder_name not in created_folders:
                                             logger.error(
-                                                f"无法获取群文件夹 {folder_name} 的 ID: {lookup_error}; "
+                                                f"无法获取群文件夹 {folder_name} 的 ID; "
                                                 f"create_error={e}"
                                             )
 
