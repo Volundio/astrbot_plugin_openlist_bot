@@ -362,7 +362,11 @@ astrbot_plugin_openlist_bot/
 │   ├── client.py               # OpenList API 客户端
 │   └── config.py               # 配置默认值和校验规则
 └── services/
-    ├── backup.py               # 备份与自动备份
+    ├── base.py                 # 服务基类与共享临时文件工具
+    ├── backup.py               # 备份与自动备份任务编排
+    ├── backup_scanner.py       # 群文件扫描、过滤和去重
+    ├── backup_target.py        # 备份目标路径、同名处理和已存在判断
+    ├── backup_uploader.py      # 群文件上传重试和备用上传
     ├── browse.py               # 浏览、搜索、删除、新建
     ├── config_command.py       # 配置命令
     ├── download.py             # 下载与链接发送

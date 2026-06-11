@@ -5,7 +5,6 @@ import chardet
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from astrbot.api.star import StarTools
 
 from .base import PluginService
 
@@ -163,10 +162,7 @@ class PreviewService(PluginService):
                 download_headers = self._normalize_download_headers(link.get("header", {}))
 
                 # 下载到临时目录
-                temp_dir = os.path.join(StarTools.get_data_dir("openlist"), "temp_preview")
-                os.makedirs(temp_dir, exist_ok=True)
-                safe_filename = self._sanitize_filename(file_name)
-                temp_file_path = os.path.join(temp_dir, f"preview_{self._unique_suffix()}_{safe_filename}")
+                temp_file_path = self._make_temp_file_path("temp_preview", "preview", file_name)
 
                 try:
                     timeout = aiohttp.ClientTimeout(
@@ -231,8 +227,7 @@ class PreviewService(PluginService):
 
                 finally:
                     # 清理临时文件
-                    if os.path.exists(temp_file_path):
-                        os.remove(temp_file_path)
+                    self._remove_file_quietly(temp_file_path, "预览临时文件")
 
         except Exception as e:
             logger.error(f"预览失败: {e}", exc_info=True)

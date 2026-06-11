@@ -17,6 +17,20 @@ class PluginService:
     def __getattr__(self, name):
         return getattr(self.plugin, name)
 
+    def _make_temp_file_path(self, temp_dir_name: str, prefix: str, file_name: str) -> str:
+        temp_dir = os.path.join(StarTools.get_data_dir("openlist"), temp_dir_name)
+        os.makedirs(temp_dir, exist_ok=True)
+        safe_filename = self._sanitize_filename(file_name, prefix)
+        return os.path.join(temp_dir, f"{prefix}_{self._unique_suffix()}_{safe_filename}")
+
+    def _remove_file_quietly(self, file_path: str, log_prefix: str = "临时文件"):
+        if not file_path or not os.path.exists(file_path):
+            return
+        try:
+            os.remove(file_path)
+        except OSError as e:
+            logger.warning(f"清理{log_prefix}失败: {file_path}, err={e}")
+
     async def _upload_url_via_temp_file(
         self,
         client,
@@ -34,14 +48,11 @@ class PluginService:
         """Download a URL to a temp file, upload it, and always clean temp files."""
         attempts = max(1, attempts)
         current_url = source_url
-        safe_filename = self._sanitize_filename(file_name, temp_prefix)
-        temp_dir = os.path.join(StarTools.get_data_dir("openlist"), temp_dir_name)
-        os.makedirs(temp_dir, exist_ok=True)
         reason = "备用上传本地下载失败"
         prefix = f"{log_prefix} " if log_prefix else ""
 
         for attempt in range(1, attempts + 1):
-            temp_file_path = os.path.join(temp_dir, f"{temp_prefix}_{self._unique_suffix()}_{safe_filename}")
+            temp_file_path = self._make_temp_file_path(temp_dir_name, temp_prefix, file_name)
             try:
                 if callable(refresh_url):
                     try:
@@ -78,11 +89,7 @@ class PluginService:
                 logger.error(f"{prefix}备用上传文件 {file_name} 第 {attempt}/{attempts} 次异常: {e}", exc_info=True)
             finally:
                 for cleanup_path in (temp_file_path, f"{temp_file_path}.part"):
-                    if cleanup_path and os.path.exists(cleanup_path):
-                        try:
-                            os.remove(cleanup_path)
-                        except OSError as e:
-                            logger.warning(f"{prefix}清理备用上传临时文件失败: {cleanup_path}, err={e}")
+                    self._remove_file_quietly(cleanup_path, f"{prefix}备用上传临时文件")
 
             if attempt < attempts:
                 await asyncio.sleep(max(0, retry_delay))

@@ -7,7 +7,6 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import File
-from astrbot.api.star import StarTools
 
 from .base import PluginService
 
@@ -71,10 +70,7 @@ class DownloadService(PluginService):
                         "请使用 ol ls 获取下载链接。"
                     )
                     return
-                downloads_dir = os.path.join(StarTools.get_data_dir("openlist"), "downloads")
-                os.makedirs(downloads_dir, exist_ok=True)
-                safe_filename = self._sanitize_filename(file_name)
-                temp_file_path = os.path.join(downloads_dir, f"{user_id}_{self._unique_suffix()}_{safe_filename}")
+                temp_file_path = self._make_temp_file_path("downloads", str(user_id), file_name)
                 yield event.plain_result(f"📥 开始下载: {file_name}\n💾 大小: {self._format_file_size(file_size)}")
                 timeout = aiohttp.ClientTimeout(
                     total=None,
@@ -119,11 +115,8 @@ class DownloadService(PluginService):
             logger.error(f"用户 {user_id} 下载文件失败: {e}, 文件: {file_name}, 路径: {file_path}", exc_info=True)
             yield event.plain_result(f"❌ 下载失败: {str(e)}\n💡 提示: 管理员可在后台日志中查看详细错误信息")
         finally:
-            if temp_file_path and not sent_file and os.path.exists(temp_file_path):
-                try:
-                    os.remove(temp_file_path)
-                except OSError as e:
-                    logger.debug(f"清理下载临时文件失败: {temp_file_path}, err={e}")
+            if temp_file_path and not sent_file:
+                self._remove_file_quietly(temp_file_path, "下载临时文件")
 
     async def _get_and_send_download_link(self, event: AstrMessageEvent, item: Dict, user_config: Dict, full_path: str = None):
         """获取指定项目的文件链接并发送"""

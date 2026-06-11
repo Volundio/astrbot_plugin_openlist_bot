@@ -6,7 +6,6 @@ import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
 from astrbot.api.message_components import File
-from astrbot.api.star import StarTools
 
 from .base import PluginService
 
@@ -143,9 +142,6 @@ class RestoreService(PluginService):
                 max_download_size_mb = self._get_size_limit_mb(user_config, "max_download_size", 50)
                 max_download_size = max_download_size_mb * 1024 * 1024
 
-                downloads_dir = os.path.join(StarTools.get_data_dir("openlist"), "downloads")
-                os.makedirs(downloads_dir, exist_ok=True)
-
                 for i, item in enumerate(files_to_restore, 1):
                     file_name = item["name"]
                     full_path = item["full_path"]
@@ -182,8 +178,7 @@ class RestoreService(PluginService):
                             fail_count += 1
                             continue
 
-                        safe_filename = self._sanitize_filename(file_name)
-                        temp_file_path = os.path.join(downloads_dir, f"restore_{self._unique_suffix()}_{safe_filename}")
+                        temp_file_path = self._make_temp_file_path("downloads", "restore", file_name)
 
                         timeout = aiohttp.ClientTimeout(
                             total=None,
@@ -212,8 +207,7 @@ class RestoreService(PluginService):
                                 f"超过限制 {max_download_size_mb}MB。"
                             )
                             fail_count += 1
-                            if temp_file_path and os.path.exists(temp_file_path):
-                                os.remove(temp_file_path)
+                            self._remove_file_quietly(temp_file_path, "恢复临时文件")
                             continue
 
                         # 2. 发送/上传文件
@@ -267,8 +261,7 @@ class RestoreService(PluginService):
                                 fail_count += 1
 
                         # 3. 清理临时文件
-                        if temp_file_path and os.path.exists(temp_file_path):
-                            os.remove(temp_file_path)
+                        self._remove_file_quietly(temp_file_path, "恢复临时文件")
 
                         if i % 5 == 0 or i == total:
                             logger.info(f"🔄 恢复进度: {i}/{total} (成功: {success_count}, 失败: {fail_count})")
@@ -276,8 +269,7 @@ class RestoreService(PluginService):
                     except Exception as e:
                         logger.error(f"处理文件 {file_name} 时发生错误: {e}")
                         fail_count += 1
-                        if temp_file_path and os.path.exists(temp_file_path):
-                            os.remove(temp_file_path)
+                        self._remove_file_quietly(temp_file_path, "恢复临时文件")
 
                 yield event.plain_result(f"✅ 恢复任务完成!\n📊 统计: 总计 {total}, 成功 {success_count}, 失败 {fail_count}\n🎯 目标: {target_desc}")
 
