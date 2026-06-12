@@ -316,6 +316,7 @@ ol restore /backup/folder
 * 如果 QQ/NapCat 返回群文件已不存在（`code=-103`），插件会直接记录失败原因，不会进入本地临时文件备用上传。
 * 备份失败项会保存到临时失败清单，结束消息会列出失败文件和原因，使用 `ol backup retry` 可只重试失败项。
 * `ol autobackup enable` 开启自动备份后，会立即执行一次全量备份。
+* 后续群文件上传会通过 OneBot `group_upload` 通知、普通消息 `file` 段或 AstrBot `File` 组件触发自动备份；如果事件提供 `file_id`，插件会直接获取群文件下载 URL 并上传。
 * `ol autobackup cancel [@群号]` 可中途取消 `enable` 触发的首次全量备份。
 * `ol autobackup disable` 只会关闭后续自动备份；如果首次全量备份正在执行，需要另行发送 `cancel`。
 * 自动备份配置需要群主或管理员权限。

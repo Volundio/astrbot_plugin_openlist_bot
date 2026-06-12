@@ -839,7 +839,7 @@ class OpenlistPlugin(Star):
         """记录最近附件消息，供 ol upload 使用。"""
         await self.upload_service.remember_uploadable_message(event)
 
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=2)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=2)
     async def handle_group_file_upload(self, event: AstrMessageEvent):
         """处理群文件上传事件（自动备份）"""
         return await self.backup_service.handle_group_file_upload(event)

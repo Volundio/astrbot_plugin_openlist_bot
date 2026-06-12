@@ -69,6 +69,86 @@ class BackupService(PluginService):
         text = str(reason or "")
         return "文件不存在" in text or "code=-103" in text
 
+    def _extract_autobackup_file_payloads(self, event: AstrMessageEvent) -> List[Dict]:
+        message_obj = getattr(event, "message_obj", None)
+        raw_event_data = self._read_value(message_obj, "raw_message", {})
+        group_id = self._get_event_group_id(event)
+        file_components = [msg for msg in event.get_messages() if isinstance(msg, File)]
+
+        def component_payload(component: File) -> Dict:
+            return {
+                "group_id": group_id,
+                "file_name": self._read_value(component, "name") or self._read_value(component, "file"),
+                "file_id": self._read_value(component, "file_id"),
+                "file_size": self._to_int_or_none(
+                    self._read_value(component, "file_size") or self._read_value(component, "size")
+                ),
+                "file_url": self._read_value(component, "url"),
+                "busid": self._read_value(component, "busid", 0),
+                "file_component": component,
+                "source": "component",
+            }
+
+        notice_type = self._read_value(raw_event_data, "notice_type")
+        if notice_type == "group_upload":
+            file_info = self._read_value(raw_event_data, "file", {}) or {}
+            file_name = (
+                self._read_value(file_info, "name")
+                or self._read_value(file_info, "file_name")
+                or self._read_value(file_info, "file")
+            )
+            file_id = (
+                self._read_value(file_info, "id")
+                or self._read_value(file_info, "file_id")
+                or self._read_value(raw_event_data, "file_id")
+            )
+            return [{
+                "group_id": self._read_value(raw_event_data, "group_id", group_id),
+                "file_name": file_name,
+                "file_id": file_id,
+                "file_size": self._to_int_or_none(
+                    self._read_value(file_info, "size", self._read_value(raw_event_data, "file_size"))
+                ),
+                "file_url": self._read_value(file_info, "url", self._read_value(raw_event_data, "url")),
+                "busid": self._read_value(file_info, "busid", self._read_value(raw_event_data, "busid", 0)),
+                "file_component": None,
+                "source": "notice",
+            }]
+
+        message_list = self._read_value(raw_event_data, "message")
+        payloads = []
+        if not isinstance(message_list, list):
+            return [component_payload(component) for component in file_components]
+
+        file_component_index = 0
+        for segment_dict in message_list:
+            if not isinstance(segment_dict, dict) or segment_dict.get("type") != "file":
+                continue
+            data_dict = segment_dict.get("data", {})
+            file_name = data_dict.get("file") or data_dict.get("name") or data_dict.get("file_name")
+            file_component = None
+            for component in file_components:
+                if getattr(component, "name", None) == file_name:
+                    file_component = component
+                    break
+            if file_component is None and file_component_index < len(file_components):
+                file_component = file_components[file_component_index]
+            file_component_index += 1
+
+            payloads.append({
+                "group_id": group_id,
+                "file_name": file_name,
+                "file_id": data_dict.get("file_id") or data_dict.get("id"),
+                "file_size": self._to_int_or_none(data_dict.get("file_size") or data_dict.get("size")),
+                "file_url": data_dict.get("url"),
+                "busid": data_dict.get("busid", 0),
+                "file_component": file_component,
+                "source": "message",
+            })
+        if not payloads:
+            payloads = [component_payload(component) for component in file_components]
+        return payloads
+
     def _format_backup_scan_summary(self, stats: Dict) -> str:
         raw_count = stats.get("raw_count", 0)
         reported_count = stats.get("reported_count")
@@ -128,7 +208,7 @@ class BackupService(PluginService):
     async def _run_group_file_autobackup(
         self,
         event: AstrMessageEvent,
-        file_component: File,
+        file_component: Optional[File],
         file_name: str,
         file_size: Optional[int],
         file_url: str,
@@ -177,7 +257,7 @@ class BackupService(PluginService):
                             if target_file_name != file_name:
                                 item["_backup_target_name"] = target_file_name
                                 logger.info(f"📌 [自动备份] 同名冲突文件改名备份: {file_name} -> {target_file_name}")
-                        if (file_url or file_id) and file_size is not None:
+                        if file_url or file_id:
                             retry_attempts = self._get_positive_int_config(user_config, "backup_retry_attempts", 3)
                             retry_delay = self._get_positive_int_config(user_config, "backup_retry_delay", 5, minimum=0)
                             if file_id:
@@ -194,7 +274,7 @@ class BackupService(PluginService):
                             else:
                                 logger.info(f"🚀 [自动备份] 使用 URL 流式中转: {target_file_name}, size={file_size}, target={target_path}")
                                 success = await client.upload_url_stream(file_url, target_path, target_file_name, file_size)
-                        else:
+                        elif file_component:
                             get_file_started_at = time.monotonic()
                             file_path = await file_component.get_file()
                             logger.info(
@@ -212,6 +292,9 @@ class BackupService(PluginService):
                                 return
 
                             success = await client.upload_file(file_path, target_path, target_file_name)
+                        else:
+                            logger.warning(f"⚠️ [自动备份] 无可用下载来源，跳过文件: {file_name}")
+                            return
 
                         if success:
                             logger.info(f"✅ [自动备份] 文件 {target_file_name} 上传成功。")
@@ -227,89 +310,73 @@ class BackupService(PluginService):
 
     async def handle_group_file_upload(self, event: AstrMessageEvent):
         """处理群文件上传事件（自动备份）"""
-        raw_event_data = event.message_obj.raw_message
-        message_list = raw_event_data.get("message") if isinstance(raw_event_data, dict) else None
-        if not isinstance(message_list, list):
+        payloads = self._extract_autobackup_file_payloads(event)
+        if not payloads:
             return
 
-        # 遍历消息段寻找文件段
-        for segment_dict in message_list:
-            if isinstance(segment_dict, dict) and segment_dict.get("type") == "file":
-                data_dict = segment_dict.get("data", {})
-                file_name = data_dict.get("file")
-                file_id = data_dict.get("file_id")
-                file_size = data_dict.get("file_size")
-                file_url = data_dict.get("url")
+        for payload in payloads:
+            file_name = payload.get("file_name")
+            if not file_name:
+                logger.debug(f"🧵 [自动备份] 跳过缺少文件名的上传事件: {payload}")
+                continue
+            file_id = payload.get("file_id")
+            file_size = payload.get("file_size")
+            file_url = payload.get("file_url")
+            file_component = payload.get("file_component")
+            group_id = str(payload.get("group_id") or "")
+            if not group_id:
+                logger.debug(f"🧵 [自动备份] 跳过缺少群号的上传事件: file={file_name}")
+                continue
 
-                if not file_name or not file_id:
+            if not (file_id or file_url or file_component):
+                logger.debug(f"🧵 [自动备份] 跳过缺少下载来源的上传事件: group={group_id}, file={file_name}")
+                continue
+
+            global_cfg = self.get_global_config()
+            target_path = self._get_autobackup_target_path(global_cfg, group_id)
+
+            if not target_path:
+                continue
+
+            user_config = global_cfg
+            if not self._validate_config(user_config):
+                logger.warning(f"⚠️ [自动备份] 群 {group_id} 触发了自动备份，但未找到有效的 Openlist 配置。")
+                continue
+
+            # 预先检查大小限制 (从事件数据获取)
+            if file_size is not None:
+                max_size_mb = self._get_size_limit_mb(user_config, "backup_max_size", 0)
+                if max_size_mb > 0 and file_size > (max_size_mb * 1024 * 1024):
+                    logger.info(f"⏭️ [自动备份] 文件 {file_name} 超过限制 {max_size_mb}MB (事件报送大小: {file_size})，跳过。")
                     continue
 
-                # 转换文件大小
-                if isinstance(file_size, str):
-                    try:
-                        file_size = int(file_size)
-                    except ValueError:
-                        file_size = None
+            # 使用配置中的备份过滤条件
+            allowed_exts = self._get_extension_filter(user_config, "backup_allowed_extensions")
+            if allowed_exts:
+                ext = os.path.splitext(file_name.lower())[1]
+                if ext not in allowed_exts:
+                    logger.info(f"⏭️ [自动备份] 文件 {file_name} 后缀 {ext} 不在允许范围内，跳过。")
+                    continue
 
-                # 命中文件，开始执行自动备份检查
-                group_id = str(event.message_obj.group_id)
-                if not group_id:
-                    return
-
-                global_cfg = self.get_global_config()
-                target_path = self._get_autobackup_target_path(global_cfg, group_id)
-
-                if not target_path:
-                    return
-
-                user_config = global_cfg
-                if not self._validate_config(user_config):
-                    logger.warning(f"⚠️ [自动备份] 群 {group_id} 触发了自动备份，但未找到有效的 Openlist 配置。")
-                    return
-
-                # 预先检查大小限制 (从事件数据获取)
-                if file_size is not None:
-                    max_size_mb = self._get_size_limit_mb(user_config, "backup_max_size", 0)
-                    if max_size_mb > 0 and file_size > (max_size_mb * 1024 * 1024):
-                        logger.info(f"⏭️ [自动备份] 文件 {file_name} 超过限制 {max_size_mb}MB (事件报送大小: {file_size})，跳过。")
-                        return
-
-                # 获取对应的 File 组件
-                file_component = None
-                for msg in event.get_messages():
-                    if isinstance(msg, File):
-                        file_component = msg
-                        break
-
-                if not file_component:
-                    return
-
-                # 使用配置中的备份过滤条件
-                allowed_exts = self._get_extension_filter(user_config, "backup_allowed_extensions")
-                if allowed_exts:
-                    ext = os.path.splitext(file_name.lower())[1]
-                    if ext not in allowed_exts:
-                        logger.info(f"⏭️ [自动备份] 文件 {file_name} 后缀 {ext} 不在允许范围内，跳过。")
-                        return
-
-                task_user_config = dict(user_config)
-                asyncio.create_task(
-                    self._run_group_file_autobackup(
-                        event=event,
-                        file_component=file_component,
-                        file_name=file_name,
-                        file_size=file_size,
-                        file_url=file_url,
-                        target_path=target_path,
-                        user_config=task_user_config,
-                        group_id=group_id,
-                        file_id=file_id,
-                        busid=data_dict.get("busid", 0),
-                    )
+            task_user_config = dict(user_config)
+            asyncio.create_task(
+                self._run_group_file_autobackup(
+                    event=event,
+                    file_component=file_component,
+                    file_name=file_name,
+                    file_size=file_size,
+                    file_url=file_url,
+                    target_path=target_path,
+                    user_config=task_user_config,
+                    group_id=group_id,
+                    file_id=file_id,
+                    busid=payload.get("busid", 0),
                 )
-                logger.debug(f"🧵 [自动备份] 已转入后台任务: group={group_id}, file={file_name}")
-
-                break # 已经处理了文件，跳出循环
+            )
+            logger.info(
+                f"🧵 [自动备份] 已转入后台任务: group={group_id}, file={file_name}, "
+                f"source={payload.get('source')}, has_file_id={bool(file_id)}, has_url={bool(file_url)}"
+            )
 
     async def _backup_group_files(self, event: AstrMessageEvent, group_id: int, target_path: str, user_config: Dict):
         """执行群文件备份"""
