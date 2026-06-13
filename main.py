@@ -12,6 +12,7 @@ from astrbot.api.message_components import File
 from astrbot.api import logger
 from .lib.client import OpenlistClient
 from .lib.config import (
+    AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY,
     EXTENSION_CONFIG_KEYS,
     GLOBAL_LEGACY_CONFIG_KEYS,
     WEBUI_CONFIG_MAPPING,
@@ -60,29 +61,10 @@ class OpenlistPlugin(Star):
         for webui_key, local_key in WEBUI_CONFIG_MAPPING.items():
             webui_val = self.get_webui_config(webui_key)
             if webui_val is not None:
-                # 如果是列表（autobackup_groups），合并
-                if isinstance(webui_val, list) and local_key == "autobackup_groups":
-                    local_val = config.get(local_key, [])
-                    if not isinstance(local_val, list):
-                        local_val = []
-                    # 简单的去重合并
-                    combined = [str(item).strip() for item in local_val if str(item).strip()]
-                    existing_gids = {item.split(":", 1)[0] for item in combined}
-                    for item in webui_val:
-                        item = str(item).strip()
-                        if not item:
-                            continue
-                        gid = item.split(":", 1)[0]
-                        if gid not in existing_gids:
-                            combined.append(item)
-                            existing_gids.add(gid)
-                    config[local_key] = combined
-                # 其他项，只有当本地配置为空或仍为默认值时才使用 WebUI
-                else:
-                    current_val = config.get(local_key)
-                    default_val = defaults.get(local_key, defaults.get(webui_key))
-                    if current_val in (None, "") or current_val == default_val:
-                        config[local_key] = webui_val
+                current_val = config.get(local_key)
+                default_val = defaults.get(local_key, defaults.get(webui_key))
+                if current_val in (None, "") or current_val == default_val:
+                    config[local_key] = webui_val
 
         # 兼容旧版 global_config.json 中的 default_* 字段
         for legacy_key, local_key in GLOBAL_LEGACY_CONFIG_KEYS.items():
@@ -335,9 +317,73 @@ class OpenlistPlugin(Star):
 
         return self._is_admin_role(self._extract_sender_role(event))
 
+    def _autobackup_entry_group_id(self, item) -> Optional[str]:
+        """解析自动备份群配置项中的群号。"""
+        if not isinstance(item, str):
+            return None
+        item = item.strip()
+        if not item:
+            return None
+        gid = item.split(":", 1)[0] if ":" in item else item
+        gid = gid.strip()
+        return gid or None
+
+    def _normalize_autobackup_group_entries(self, groups) -> List[str]:
+        """清理自动备份群配置项，并按群号去重保序。"""
+        if not isinstance(groups, list):
+            return []
+        normalized = []
+        seen_gids = set()
+        for item in groups:
+            item = str(item).strip()
+            gid = self._autobackup_entry_group_id(item)
+            if not gid or gid in seen_gids:
+                continue
+            normalized.append(item)
+            seen_gids.add(gid)
+        return normalized
+
+    def _migrate_autobackup_groups_from_webui(self):
+        """将旧版 WebUI 自动备份群配置一次性迁移到本地运行时配置。"""
+        webui_groups = self._normalize_autobackup_group_entries(
+            self.get_webui_config("autobackup_groups", [])
+        )
+        if not webui_groups:
+            return
+
+        local_cfg = self.global_config_manager.load_config()
+        if local_cfg.get(AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY):
+            return
+
+        local_groups = self._normalize_autobackup_group_entries(
+            local_cfg.get("autobackup_groups", [])
+        )
+        existing_gids = {
+            gid for gid in (self._autobackup_entry_group_id(item) for item in local_groups)
+            if gid
+        }
+        combined = list(local_groups)
+        migrated_count = 0
+        for item in webui_groups:
+            gid = self._autobackup_entry_group_id(item)
+            if not gid or gid in existing_gids:
+                continue
+            combined.append(item)
+            existing_gids.add(gid)
+            migrated_count += 1
+
+        local_cfg["autobackup_groups"] = combined
+        local_cfg[AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY] = True
+        self.global_config_manager.save_config(local_cfg)
+        logger.info(
+            f"已完成 WebUI autobackup_groups 一次性迁移: "
+            f"webui={len(webui_groups)}, added={migrated_count}, total={len(combined)}"
+        )
+
     async def initialize(self):
         """插件初始化"""
         logger.info("Openlist文件管理插件已加载")
+        self._migrate_autobackup_groups_from_webui()
         global_cfg = self.get_global_config()
         default_url = global_cfg.get("openlist_url", "")
         require_auth = global_cfg.get("require_user_auth", True)

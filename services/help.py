@@ -79,10 +79,13 @@ class HelpService(PluginService):
 
 🔄 `ol autobackup <enable|disable|cancel> [@群号] [/路径]`
    - 配置群文件自动备份（新上传文件自动同步）。
-   - 示例: `ol autobackup enable` (开启当前群备份到默认路径，并立即执行一次全量备份)
+   - 示例: `ol autobackup enable` (首次开启当前群备份到默认路径)
    - 示例: `ol autobackup enable @123456 /backup` (指定群号和路径)
    - 示例: `ol autobackup disable @123456` (禁用指定群的自动备份)
    - 示例: `ol autobackup cancel @123456` (取消正在执行的首次全量备份)
+   - 提示: 已开启且目标目录不变时，`enable` 不会重复执行首次全量备份。
+   - 提示: 显式传入不同 `/路径` 会更新目标目录，并对新目标执行一次全量备份。
+   - 提示: 自动备份启用列表由本指令维护，发送 `ol autobackup show` 查看当前状态。
    - 提示: `cancel` 只取消 `enable` 触发的首次全量备份，不会关闭后续自动备份。
    - 提示: 禁用或取消时无需提供路径。路径须以 `/` 开头，群号须以 `@` 开头。
 

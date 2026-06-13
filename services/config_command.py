@@ -25,7 +25,8 @@ class ConfigCommandService(PluginService):
             if safe_config.get("password"): safe_config["password"] = "***"
             if safe_config.get("token"): safe_config["token"] = "***"
             for k, v in safe_config.items():
-                if k != "setup_completed": config_text += f"🔹 {k}: {v}\n"
+                if k != "setup_completed" and not k.startswith("_"):
+                    config_text += f"🔹 {k}: {v}\n"
             global_cfg = self.get_global_config()
             require_auth = global_cfg.get("require_user_auth", True)
             default_url = global_cfg.get("openlist_url", "")

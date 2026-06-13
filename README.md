@@ -27,7 +27,7 @@
 * 🔍 **文件搜索** - 支持在指定目录中搜索目标文件。
 * 📋 **文件信息** - 查看文件详细信息，并可附带下载链接 txt 附件。
 * 📦 **备份恢复** - 支持群文件递归备份、失败重试、跳过重复文件、同名冲突改名和恢复文件到群。
-* 🔄 **自动备份** - 支持群文件新增自动备份，开启时会立即执行一次全量备份。
+* 🔄 **自动备份** - 支持群文件新增自动备份，首次开启或显式更换目标目录时会执行一次全量备份。
 * 👁️ **内容预览** - 支持文本文件预览和压缩包内容查看。
 * ⚙️ **灵活设置** - 支持全局设置和用户独立设置两种模式。
 * 🧰 **传输调优** - 上传分块、超时、重试和诊断日志均可配置。
@@ -69,11 +69,12 @@
 | `allowed_extensions` | 允许的文件扩展名，留空表示不限制 |
 | `backup_default_path` | 手动备份默认目录 |
 | `autobackup_default_path` | 自动备份默认目录 |
-| `autobackup_groups` | 启用自动备份的群号列表 |
 
 > 如果只配置了用户名和密码，插件会自动登录 OpenList 并获取 Token；不需要手动填写 Token。
 >
 > 大多数公网单地址部署只需要填写 `default_openlist_url`，`public_openlist_url` 和 `fixed_base_directory` 都可以留空。
+>
+> 自动备份启用群聊是运行时状态，不再通过 WebUI 编辑；请使用 `ol autobackup show/enable/disable` 管理。旧版本中已填写的 WebUI `autobackup_groups` 会在升级后一次性迁移到本地配置。
 
 ### 💬 用户设置（聊天界面）
 
@@ -315,7 +316,9 @@ ol restore /backup/folder
 * 群文件 URL 流式中转多次失败后，会改用本地临时文件备用上传：先完整下载到 `backup_temp`，校验大小后再上传；备用上传也会按 `backup_retry_attempts` 重试并重新获取群文件 URL，无论成功或失败都会清理临时文件。
 * 如果 QQ/NapCat 返回群文件已不存在（`code=-103`），插件会直接记录失败原因，不会进入本地临时文件备用上传。
 * 备份失败项会保存到临时失败清单，结束消息会列出失败文件和原因，使用 `ol backup retry` 可只重试失败项。
-* `ol autobackup enable` 开启自动备份后，会立即执行一次全量备份。
+* `ol autobackup enable` 现在是幂等操作：目标群已开启且目标目录不变时只提示当前状态，不会重复执行首次全量备份。
+* 首次开启自动备份，或显式传入不同的 `/目标路径` 更新备份目录时，会执行一次全量备份。
+* 自动备份启用列表只由 `ol autobackup` 指令维护；旧 WebUI `autobackup_groups` 配置只会在升级后一次性迁移，不会反复覆盖指令状态。
 * 后续群文件上传会通过 OneBot `group_upload` 通知、普通消息 `file` 段或 AstrBot `File` 组件触发自动备份；如果事件提供 `file_id`，插件会直接获取群文件下载 URL 并上传。
 * `ol autobackup cancel [@群号]` 可中途取消 `enable` 触发的首次全量备份。
 * `ol autobackup disable` 只会关闭后续自动备份；如果首次全量备份正在执行，需要另行发送 `cancel`。
@@ -335,7 +338,7 @@ ol restore /backup/folder
 
 ```
 data/plugins_data/openlist/
-├── global_config.json          # 全局设置文件
+├── global_config.json          # 全局设置和自动备份运行状态文件
 ├── users/                      # 用户设置目录
 │   ├── user1.json              # 用户 1 的设置
 │   ├── user2.json              # 用户 2 的设置

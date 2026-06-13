@@ -53,6 +53,7 @@ EXTENSION_CONFIG_KEYS = {
 }
 
 CLEAR_EXTENSION_VALUES = {"none", "null", "empty", "clear", "all", "*", "空", "不限", "不限制"}
+AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY = "_autobackup_groups_webui_migrated"
 
 WEBUI_CONFIG_MAPPING = {
     "default_openlist_url": "openlist_url",
@@ -81,7 +82,6 @@ WEBUI_CONFIG_MAPPING = {
     "backup_default_path": "backup_default_path",
     "autobackup_default_path": "autobackup_default_path",
     "require_user_auth": "require_user_auth",
-    "autobackup_groups": "autobackup_groups",
     "backup_allowed_extensions": "backup_allowed_extensions",
     "backup_max_size": "backup_max_size",
     "backup_skip_existing": "backup_skip_existing",
@@ -202,7 +202,7 @@ class GlobalConfigManager:
             "debug_transfer_logging": False,
             "backup_default_path": "/backup/group_{group_id}",
             "autobackup_default_path": "/backup/group_{group_id}",
-            "autobackup_groups": [], # 启用自动备份的群号列表
+            "autobackup_groups": [], # 由 ol autobackup 指令维护的自动备份群号列表
             "backup_allowed_extensions": "",
             "backup_max_size": 0,
             "backup_skip_existing": True,

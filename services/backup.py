@@ -914,6 +914,9 @@ class BackupService(PluginService):
                 "  ol autobackup cancel @123456",
                 "",
                 "未指定群号时使用当前群；未指定路径时使用 autobackup_default_path。",
+                "自动备份启用列表由 ol autobackup 指令维护，WebUI 只配置默认目录等静态项。",
+                "已开启且目标目录不变时，enable 不会重复执行首次全量备份。",
+                "显式传入不同路径会更新目标目录，并对新目标执行一次全量备份。",
                 "cancel 只取消 enable 触发的首次全量备份，不会关闭后续自动备份。",
             ])
             yield event.plain_result("\n".join(lines))
@@ -979,12 +982,16 @@ class BackupService(PluginService):
 
         local_cfg = self.global_config_manager.load_config()
         groups = local_cfg.get("autobackup_groups", [])
+        if not isinstance(groups, list):
+            groups = []
+        target_path_was_provided = target_path is not None
 
         if action == "enable":
-            target_path = self._render_backup_path(
+            requested_target_path = self._render_backup_path(
                 target_path or global_cfg.get("autobackup_default_path", "/backup/group_{group_id}"),
                 target_gid,
             )
+            current_target_path = self._get_autobackup_target_path(global_cfg, target_gid)
 
             running_cancel_event = self._autobackup_full_cancel_events.get(target_gid)
             if running_cancel_event:
@@ -997,16 +1004,42 @@ class BackupService(PluginService):
                     )
                 return
 
+            if current_target_path:
+                if current_target_path == requested_target_path:
+                    yield event.plain_result(
+                        f"💡 群 {target_gid} 自动备份已开启。\n"
+                        f"📂 目标: {current_target_path}\n"
+                        "不会重复执行首次全量备份。"
+                    )
+                    return
+                if not target_path_was_provided:
+                    yield event.plain_result(
+                        f"💡 群 {target_gid} 自动备份已开启。\n"
+                        f"📂 当前目标: {current_target_path}\n"
+                        "未提供新的 OpenList 路径，已保持现有配置，不会重复执行首次全量备份。\n"
+                        f"如需迁移目录，请发送 ol autobackup enable @{target_gid} /新的目标路径"
+                    )
+                    return
+
+            target_path = requested_target_path
             new_entry = f"{target_gid}:{target_path}"
             # 过滤掉旧的该群配置
-            new_groups = [item for item in groups if (item.split(":", 1)[0] if ":" in item else item) != target_gid]
+            new_groups = [item for item in groups if self._autobackup_entry_group_id(item) != target_gid]
             new_groups.append(new_entry)
             local_cfg["autobackup_groups"] = new_groups
             self.global_config_manager.save_config(local_cfg)
-            yield event.plain_result(
-                f"✅ 群 {target_gid} 自动备份已开启 -> {target_path}\n"
-                f"📦 正在执行首次全量备份..."
-            )
+            if current_target_path:
+                yield event.plain_result(
+                    f"✅ 群 {target_gid} 自动备份目录已更新\n"
+                    f"📂 原目标: {current_target_path}\n"
+                    f"📂 新目标: {target_path}\n"
+                    "📦 正在对新目标执行首次全量备份..."
+                )
+            else:
+                yield event.plain_result(
+                    f"✅ 群 {target_gid} 自动备份已开启 -> {target_path}\n"
+                    f"📦 正在执行首次全量备份..."
+                )
             backup_config = self.get_global_config()
             cancel_event = asyncio.Event()
             self._autobackup_full_cancel_events[target_gid] = cancel_event
@@ -1033,15 +1066,21 @@ class BackupService(PluginService):
                     self._autobackup_full_meta.pop(target_gid, None)
 
         elif action == "disable":
-            # disable 只需要群号，忽略路径
-            new_groups = [item for item in groups if (item.split(":", 1)[0] if ":" in item else item) != target_gid]
+            if target_path:
+                yield event.plain_result(self._format_autobackup_usage_tip("禁用自动备份不需要提供路径"))
+                return
+
+            current_target_path = self._get_autobackup_target_path(global_cfg, target_gid)
+            new_groups = [item for item in groups if self._autobackup_entry_group_id(item) != target_gid]
+            removed_local = len(new_groups) < len(groups)
             running_tip = ""
             running_cancel_event = self._autobackup_full_cancel_events.get(target_gid)
             if running_cancel_event and not running_cancel_event.is_set():
                 running_tip = f"\n如需取消正在执行的首次全量备份，请发送 ol autobackup cancel @{target_gid}"
-            if len(new_groups) < len(groups):
+            if removed_local:
                 local_cfg["autobackup_groups"] = new_groups
                 self.global_config_manager.save_config(local_cfg)
+            if removed_local or current_target_path:
                 yield event.plain_result(f"✅ 群 {target_gid} 自动备份已禁用。{running_tip}")
             else:
                 yield event.plain_result(f"💡 群 {target_gid} 当前未开启自动备份。{running_tip}")
