@@ -1,8 +1,10 @@
 import os
+import posixpath
 from typing import Dict, List
 
 from astrbot.api import logger
 
+from ..lib.onebot_files import sanitize_relative_subpath, sanitize_remote_filename
 from .base import PluginService
 
 
@@ -11,15 +13,24 @@ class BackupTargetManager(PluginService):
 
     def item_target(self, target_path: str, item: Dict, use_override: bool = True) -> tuple:
         source_name = self._backup_item_source_name(item)
-        file_name = item.get("_backup_target_name") if use_override else None
-        file_name = file_name or source_name
+        override_name = item.get("_backup_target_name") if use_override else None
+        raw_name = override_name or source_name
+        file_name = sanitize_remote_filename(raw_name, fallback="") if raw_name else ""
         rel_path = item.get("relative_path") or source_name
-        file_dir = os.path.dirname(rel_path)
+        if rel_path:
+            safe_rel = sanitize_relative_subpath(rel_path, fallback_name=file_name or "file")
+            file_dir = posixpath.dirname(safe_rel)
+        else:
+            file_dir = ""
         target_root = self._normalize_openlist_path(target_path or "/")
         target_dir = target_root
         if file_dir:
             target_dir = self._normalize_openlist_path(f"{target_root.rstrip('/')}/{file_dir}")
-        target_key = self._normalize_openlist_path(f"{target_dir.rstrip('/')}/{file_name}")
+        target_key = (
+            self._normalize_openlist_path(f"{target_dir.rstrip('/')}/{file_name}")
+            if file_name
+            else target_dir
+        )
         return target_dir, file_name, target_key
 
     def item_lock_key(self, target_path: str, item: Dict) -> str:
@@ -33,9 +44,12 @@ class BackupTargetManager(PluginService):
         size = self._backup_item_size(item)
         if size is not None:
             return ("size", size)
-        file_id = item.get("file_id")
+        file_id = item.get("file_id") or item.get("svr_fileid") or item.get("cli_fileid")
         if file_id:
             return ("file_id", str(file_id))
+        fileset_id = item.get("fileset_id")
+        if fileset_id:
+            return ("fileset", str(fileset_id), item.get("file_index", 0))
         return ("unknown_size",)
 
     def _safe_suffix_part(self, value: str) -> str:
@@ -43,7 +57,7 @@ class BackupTargetManager(PluginService):
         return suffix[:16] or "duplicate"
 
     def duplicate_suffix(self, item: Dict) -> str:
-        file_id = item.get("file_id")
+        file_id = item.get("file_id") or item.get("svr_fileid") or item.get("fileset_id")
         if file_id:
             return self._safe_suffix_part(str(file_id).strip("/").split("/")[-1])
         size = self._backup_item_size(item)
@@ -66,7 +80,7 @@ class BackupTargetManager(PluginService):
             duplicate_key = (target_dir, file_name)
             identity = (duplicate_key, self.item_identity(target_path, item))
             if identity in seen_items:
-                logger.info(f"⏭️ [群备份] 跳过同目录重复群文件记录: {target_dir}/{file_name}")
+                logger.info(f"⏭️ [备份] 跳过同目录重复文件记录: {target_dir}/{file_name}")
                 continue
             seen_items.add(identity)
             target_counts[duplicate_key] = target_counts.get(duplicate_key, 0) + 1
@@ -95,7 +109,7 @@ class BackupTargetManager(PluginService):
                 index += 1
             used_for_target.add(target_name)
             renamed_item["_backup_target_name"] = target_name
-            logger.info(f"📌 [群备份] 同名群文件改名备份: {file_name} -> {target_name}")
+            logger.info(f"📌 [备份] 同名文件改名备份: {file_name} -> {target_name}")
             deduped.append(renamed_item)
         return deduped
 
@@ -104,8 +118,11 @@ class BackupTargetManager(PluginService):
             expected_size = int(file_size) if file_size is not None else None
             existing_size = int(existing.get("size", 0))
         except (TypeError, ValueError):
-            return True
-        return expected_size is None or existing_size == expected_size
+            return False
+        if expected_size is None:
+            # 当上游未提供预期大小时，只有远端已存在非空文件才视为匹配，避免被 0 字节残片误跳过
+            return existing_size > 0
+        return existing_size == expected_size
 
     async def openlist_files_by_name(self, client, target_dir: str, refresh: bool = False) -> Dict[str, Dict]:
         try:

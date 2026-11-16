@@ -58,7 +58,8 @@
             "max_preview_size": {
                 "description": "最大预览文件大小(MB)",
                 "type": "int",
-                "default": 10
+                "default": 10,
+                "hint": "-1 表示禁用预览，0 表示不限制。"
             },
             "text_preview_length": {
                 "description": "文本文件预览长度",
@@ -79,8 +80,11 @@
                 "description": "缓存有效期(秒)",
                 "type": "int",
                 "default": 300,
-                "minimum": 60,
-                "maximum": 3600
+                "slider": {
+                    "min": 60,
+                    "max": 3600,
+                    "step": 60
+                }
             },
             "max_download_size": {
                 "description": "最大下载文件大小(MB)",
@@ -155,22 +159,34 @@
                 "hint": "开启后输出上传/下载进度、连接信息和 DNS 解析等详细日志。"
             },
             "require_user_auth": {
-                "description": "要求用户认证",
+                "description": "要求用户独立认证",
                 "type": "bool",
-                "default": true,
-                "hint": "启用后每个用户需要独立配置"
+                "default": false,
+                "hint": "默认关闭（全局共享模式，所有人共用全局配置，管理员可通过 ol config set 直接修改全局配置）；开启后每个用户拥有独立配置。"
             },
             "backup_default_path": {
-                "description": "手动备份默认目录",
+                "description": "群聊手动备份默认目录",
                 "type": "string",
                 "default": "/backup/group_{group_id}",
-                "hint": "使用 ol backup 且未指定路径时的 OpenList 目录。支持 {group_id}、{gid}、{group} 占位符。"
+                "hint": "群聊中使用 ol backup 且未指定路径时的 OpenList 目录。支持 {group_id}、{gid}、{group} 占位符。"
             },
             "autobackup_default_path": {
-                "description": "自动备份默认目录",
+                "description": "群聊自动备份默认目录",
                 "type": "string",
                 "default": "/backup/group_{group_id}",
-                "hint": "执行 ol autobackup enable 且未传路径时使用。启用群聊请通过 ol autobackup show/enable/disable 管理。支持 {group_id}、{gid}、{group} 占位符。"
+                "hint": "群聊中执行 ol autobackup enable 且未传路径时使用。支持 {group_id}、{gid}、{group} 占位符。"
+            },
+            "private_backup_default_path": {
+                "description": "私聊手动备份默认目录",
+                "type": "string",
+                "default": "/backup/private_{user_id}",
+                "hint": "私聊中使用 ol backup 且未指定路径时的 OpenList 目录。支持 {user_id}、{uid} 占位符。"
+            },
+            "private_autobackup_default_path": {
+                "description": "私聊自动备份默认目录",
+                "type": "string",
+                "default": "/backup/private_{user_id}",
+                "hint": "私聊中执行 ol autobackup enable 且未传路径时使用。支持 {user_id}、{uid} 占位符。"
             },
             "backup_allowed_extensions": {
                 "description": "备份允许的文件扩展名",
@@ -194,7 +210,7 @@
                 "description": "备份单文件尝试次数",
                 "type": "int",
                 "default": 3,
-                "hint": "每个群文件备份失败时最多尝试次数，包含首次尝试。"
+                "hint": "每个文件备份失败时最多尝试次数，包含首次尝试。"
             },
             "backup_retry_delay": {
                 "description": "备份重试间隔(秒)",

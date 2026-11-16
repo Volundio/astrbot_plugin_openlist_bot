@@ -3,7 +3,6 @@ import os
 from typing import Optional
 
 from astrbot.api import logger
-from astrbot.api.star import StarTools
 
 
 class PluginService:
@@ -18,7 +17,7 @@ class PluginService:
         return getattr(self.plugin, name)
 
     def _make_temp_file_path(self, temp_dir_name: str, prefix: str, file_name: str) -> str:
-        temp_dir = os.path.join(StarTools.get_data_dir("openlist"), temp_dir_name)
+        temp_dir = os.path.join(self.data_dir, temp_dir_name)
         os.makedirs(temp_dir, exist_ok=True)
         safe_filename = self._sanitize_filename(file_name, prefix)
         return os.path.join(temp_dir, f"{prefix}_{self._unique_suffix()}_{safe_filename}")
@@ -54,16 +53,28 @@ class PluginService:
         for attempt in range(1, attempts + 1):
             temp_file_path = self._make_temp_file_path(temp_dir_name, temp_prefix, file_name)
             try:
+                refreshed_local_path = ""
                 if callable(refresh_url):
                     try:
-                        refreshed_url = await refresh_url()
-                        if refreshed_url:
-                            current_url = refreshed_url
+                        refreshed = await refresh_url()
+                        if isinstance(refreshed, dict):
+                            if refreshed.get("url"):
+                                current_url = refreshed["url"]
+                            if refreshed.get("local_path") and os.path.isfile(refreshed["local_path"]):
+                                refreshed_local_path = refreshed["local_path"]
+                        elif refreshed:
+                            current_url = refreshed
                     except Exception as e:
                         reason = str(e)
                         logger.warning(f"{prefix}备用上传刷新 URL 失败: {file_name}, attempt={attempt}/{attempts}, err={e}")
 
-                if not current_url:
+                if refreshed_local_path:
+                    if await client.upload_file(refreshed_local_path, target_path, file_name):
+                        logger.info(f"✅ {prefix}本地文件直传成功: {file_name} -> {target_path}")
+                        return True, ""
+                    reason = "备用上传本地文件上传失败"
+                    logger.warning(f"{prefix}备用上传文件 {file_name} 第 {attempt}/{attempts} 次失败: {reason}")
+                elif not current_url:
                     reason = "备用上传无法获取下载 URL"
                     logger.warning(f"{prefix}备用上传文件 {file_name} 第 {attempt}/{attempts} 次失败: {reason}")
                 else:

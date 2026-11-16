@@ -4,38 +4,57 @@ import os
 import posixpath
 import time
 import uuid
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, StarTools
-from astrbot.api.message_components import File
 from astrbot.api import logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import File
+from astrbot.api.star import Context, Star, StarTools
+
+from .lib.cache import CacheManager
 from .lib.client import OpenlistClient
 from .lib.config import (
     AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY,
     EXTENSION_CONFIG_KEYS,
     GLOBAL_LEGACY_CONFIG_KEYS,
+    LOCAL_TO_WEBUI_CONFIG_MAPPING,
+    PLUGIN_DATA_DIR_NAME,
     WEBUI_CONFIG_MAPPING,
-    UserConfigManager,
     GlobalConfigManager,
+    UserConfigManager,
 )
-from .lib.cache import CacheManager
-from .services import BackupService, BrowseService, ConfigCommandService, DownloadService, HelpService, PreviewService, RestoreService, UploadService
+from .lib.onebot_files import maybe_int_id, sanitize_remote_filename
+from .services import (
+    BackupService,
+    BrowseService,
+    ConfigCommandService,
+    DownloadService,
+    HelpService,
+    PreviewService,
+    RestoreService,
+    UploadService,
+)
 
 
 class OpenlistPlugin(Star):
     LEGACY_ALLOWED_EXTENSIONS = {
         ".txt", ".pdf", ".doc", ".docx", ".zip", ".rar", ".jpg", ".png", ".gif", ".mp4", ".mp3"
     }
+    NAV_STATE_TTL_SECONDS = 24 * 3600
+    MAX_NAV_STATES = 500
+    TEMP_DIR_NAMES = ("downloads", "links", "temp_preview", "upload_temp", "backup_temp")
 
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.user_config_managers = {}
         self.config = config
-        self.global_config_manager = GlobalConfigManager("openlist")
-        self.cache_manager = CacheManager("openlist")
+        self.data_dir = str(StarTools.get_data_dir(PLUGIN_DATA_DIR_NAME))
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.global_config_manager = GlobalConfigManager(PLUGIN_DATA_DIR_NAME)
+        self.cache_manager = CacheManager(PLUGIN_DATA_DIR_NAME)
         self.user_navigation_state = {}
         self.recent_upload_messages = {}
+        self._background_tasks = set()
         self.upload_service = UploadService(self)
         self.download_service = DownloadService(self)
         self.backup_service = BackupService(self)
@@ -46,36 +65,95 @@ class OpenlistPlugin(Star):
         self.help_service = HelpService(self)
         self.autobackup_semaphore = asyncio.Semaphore(2)
 
+    def _spawn_background_task(self, coro) -> asyncio.Task:
+        """创建并跟踪后台任务，防止被 GC 提前回收并在插件卸载时安全清理。"""
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
+
     def get_webui_config(self, key: str, default=None):
         """获取WebUI配置项"""
-        if self.config:
-            return self.config.get("global_settings", {}).get(key, default)
+        if isinstance(self.config, dict):
+            global_settings = self.config.get("global_settings")
+            if isinstance(global_settings, dict) and key in global_settings:
+                return global_settings.get(key, default)
+            if key in self.config:
+                return self.config.get(key, default)
         return default
 
-    def get_global_config(self) -> Dict:
-        """获取整合后的全局配置（WebUI + global_config.json）"""
-        # 直接加载本地配置
-        config = self.global_config_manager.load_config()
+    def set_global_config_value(self, local_key: str, value) -> bool:
+        """直接修改全局配置并同步至 WebUI 配置（若支持持久化）与本地兜底配置。"""
+        webui_key = LOCAL_TO_WEBUI_CONFIG_MAPPING.get(local_key, local_key)
+        webui_value = value
+        if local_key in EXTENSION_CONFIG_KEYS and isinstance(value, list):
+            webui_value = ",".join(value)
 
+        saved_to_webui = False
+        if isinstance(self.config, dict):
+            global_settings = self.config.get("global_settings")
+            if not isinstance(global_settings, dict):
+                global_settings = {}
+                self.config["global_settings"] = global_settings
+            global_settings[webui_key] = webui_value
+            save_fn = getattr(self.config, "save_config", None)
+            if callable(save_fn):
+                try:
+                    save_fn()
+                    saved_to_webui = True
+                except Exception as e:
+                    logger.warning(f"同步保存 WebUI 配置失败，将使用本地配置持久化: {e}")
+
+        if saved_to_webui:
+            self.global_config_manager.clear_global_override(local_key)
+        else:
+            self.global_config_manager.set_global_override(local_key, value)
+
+        if local_key in ("openlist_url", "username", "password", "token"):
+            OpenlistClient.clear_token_cache()
+        return True
+
+    def _normalize_extension_list(self, value, key: str = "allowed_extensions") -> List[str]:
+        if isinstance(value, str):
+            extensions = [ext.strip().lower() for ext in value.split(",") if ext.strip()]
+        elif isinstance(value, list):
+            extensions = [str(ext).strip().lower() for ext in value if str(ext).strip()]
+        else:
+            return []
+        extensions = [ext if ext.startswith(".") else f".{ext}" for ext in extensions]
+        if key == "allowed_extensions" and set(extensions) == self.LEGACY_ALLOWED_EXTENSIONS:
+            return []
+        return extensions
+
+    def get_global_config(self) -> Dict:
+        """获取整合后的全局配置（默认值 -> 本地遗留项 -> WebUI -> 命令显式覆盖）"""
         defaults = self.global_config_manager.default_config
-        for webui_key, local_key in WEBUI_CONFIG_MAPPING.items():
-            webui_val = self.get_webui_config(webui_key)
-            if webui_val is not None:
-                current_val = config.get(local_key)
-                default_val = defaults.get(local_key, defaults.get(webui_key))
-                if current_val in (None, "") or current_val == default_val:
-                    config[local_key] = webui_val
+        raw_local = self.global_config_manager.load_raw_file()
+        config = defaults.copy()
+        if raw_local:
+            config.update(raw_local)
 
         # 兼容旧版 global_config.json 中的 default_* 字段
         for legacy_key, local_key in GLOBAL_LEGACY_CONFIG_KEYS.items():
             if not config.get(local_key) and config.get(legacy_key):
                 config[local_key] = config[legacy_key]
 
-        # 统一将扩展名字符串转为列表
+        # WebUI 配置作为静态配置权威源（但若 WebUI 字符串为空而旧本地配置已有值，则保留本地非空值防丢失）
+        for webui_key, local_key in WEBUI_CONFIG_MAPPING.items():
+            webui_val = self.get_webui_config(webui_key)
+            if webui_val is None:
+                continue
+            if webui_val == "" and raw_local.get(local_key) not in (None, ""):
+                continue
+            config[local_key] = webui_val
+
+        # 应用通过 ol config set 直接设置的全局覆盖项（当 WebUI save_config 不可用时生效）
+        overrides = self.global_config_manager.get_global_overrides(raw_local)
+        for override_key, override_val in overrides.items():
+            config[override_key] = override_val
+
         for key in EXTENSION_CONFIG_KEYS:
-            if isinstance(config.get(key), str):
-                config[key] = [ext.strip().lower() for ext in config[key].split(",") if ext.strip()]
-                config[key] = [ext if ext.startswith(".") else f".{ext}" for ext in config[key]]
+            config[key] = self._normalize_extension_list(config.get(key), key=key)
 
         return config
 
@@ -147,6 +225,16 @@ class OpenlistPlugin(Star):
             transfer_config=self._get_transfer_config(user_config),
         )
 
+    def _invalidate_openlist_cache(self, user_config: Dict, path: str = None, user_id: str = None):
+        """优先按 OpenList 服务器与目录精确失效缓存。"""
+        url = (user_config or {}).get("openlist_url", "")
+        if url:
+            self.cache_manager.invalidate_path(url, path)
+        elif user_id:
+            self.cache_manager.clear_cache(user_id=user_id)
+        else:
+            self.cache_manager.clear_cache()
+
     def _get_retry_config(self, user_config: Dict, prefix: str) -> tuple:
         """读取重试配置；attempts 包含首次尝试。"""
         return (
@@ -156,17 +244,7 @@ class OpenlistPlugin(Star):
 
     def _get_extension_filter(self, user_config: Dict, key: str = "allowed_extensions") -> List[str]:
         """读取扩展名过滤配置；空列表表示不限制。"""
-        value = user_config.get(key, [])
-        if isinstance(value, str):
-            extensions = [ext.strip().lower() for ext in value.split(",") if ext.strip()]
-        elif isinstance(value, list):
-            extensions = [str(ext).strip().lower() for ext in value if str(ext).strip()]
-        else:
-            return []
-        extensions = [ext if ext.startswith(".") else f".{ext}" for ext in extensions]
-        if key == "allowed_extensions" and set(extensions) == self.LEGACY_ALLOWED_EXTENSIONS:
-            return []
-        return extensions
+        return self._normalize_extension_list(user_config.get(key, []), key=key)
 
     def _is_extension_allowed(self, filename: str, user_config: Dict, key: str = "allowed_extensions") -> bool:
         """判断文件扩展名是否通过配置过滤。"""
@@ -240,25 +318,34 @@ class OpenlistPlugin(Star):
     async def _get_group_member_role(self, event: AstrMessageEvent, group_id, user_id=None):
         """通过 OneBot 查询指定用户在目标群的角色。"""
         user_id = user_id or event.get_sender_id()
+        bot = getattr(event, "bot", None)
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        if not callable(call_action):
+            return None
         try:
-            member_info = await event.bot.api.call_action(
+            member_info = await call_action(
                 "get_group_member_info",
-                group_id=int(group_id),
-                user_id=int(user_id),
+                group_id=maybe_int_id(group_id),
+                user_id=maybe_int_id(user_id),
                 no_cache=True,
             )
         except Exception as e:
             logger.warning(f"查询目标群成员权限失败: group={group_id}, user={user_id}, err={e}")
             return None
 
+        if isinstance(member_info, dict) and "data" in member_info and "retcode" in member_info:
+            member_info = member_info.get("data")
         if not isinstance(member_info, dict):
             return None
         return member_info.get("role") or member_info.get("permission")
 
     async def _has_target_group_permission(self, event: AstrMessageEvent, group_id) -> bool:
-        """允许当前群直接操作；跨群/私聊指定群时要求目标群群主或管理员。"""
+        """允许当前群直接操作或机器人全局管理员操作；跨群/私聊指定群时要求目标群群主或管理员。"""
         current_group_id = self._get_event_group_id(event)
         if current_group_id not in (None, "") and str(current_group_id) == str(group_id):
+            return True
+        if self._is_bot_global_admin(event):
             return True
 
         role = await self._get_group_member_role(event, group_id)
@@ -274,6 +361,17 @@ class OpenlistPlugin(Star):
             f"current_group={self._get_event_group_id(event)}, target_group={group_id}"
         )
         return True
+
+    def _is_bot_global_admin(self, event: AstrMessageEvent) -> bool:
+        """判断发送者是否为 AstrBot 全局管理员。"""
+        is_admin = getattr(event, "is_admin", None)
+        if callable(is_admin):
+            try:
+                if is_admin():
+                    return True
+            except Exception as e:
+                logger.debug(f"调用 event.is_admin() 失败: {e}")
+        return False
 
     def _extract_sender_role(self, event: AstrMessageEvent):
         """尽量从 AstrBot 事件和平台原始事件中提取发送者群角色。"""
@@ -307,18 +405,12 @@ class OpenlistPlugin(Star):
 
     def _is_event_admin(self, event: AstrMessageEvent) -> bool:
         """判断事件发送者是否为管理员，优先使用 AstrBot 能力，再回退到平台原始角色。"""
-        is_admin = getattr(event, "is_admin", None)
-        if callable(is_admin):
-            try:
-                if is_admin():
-                    return True
-            except Exception as e:
-                logger.debug(f"调用 event.is_admin() 失败，继续使用角色字段判断: {e}")
-
+        if self._is_bot_global_admin(event):
+            return True
         return self._is_admin_role(self._extract_sender_role(event))
 
     def _autobackup_entry_group_id(self, item) -> Optional[str]:
-        """解析自动备份群配置项中的群号。"""
+        """解析自动备份配置项中的目标 ID（群号或用户号）。"""
         if not isinstance(item, str):
             return None
         item = item.strip()
@@ -329,7 +421,7 @@ class OpenlistPlugin(Star):
         return gid or None
 
     def _normalize_autobackup_group_entries(self, groups) -> List[str]:
-        """清理自动备份群配置项，并按群号去重保序。"""
+        """清理自动备份配置项，并按 ID 去重保序。"""
         if not isinstance(groups, list):
             return []
         normalized = []
@@ -351,12 +443,12 @@ class OpenlistPlugin(Star):
         if not webui_groups:
             return
 
-        local_cfg = self.global_config_manager.load_config()
-        if local_cfg.get(AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY):
+        raw_local = self.global_config_manager.load_raw_file()
+        if raw_local.get(AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY):
             return
 
         local_groups = self._normalize_autobackup_group_entries(
-            local_cfg.get("autobackup_groups", [])
+            raw_local.get("autobackup_groups", [])
         )
         existing_gids = {
             gid for gid in (self._autobackup_entry_group_id(item) for item in local_groups)
@@ -372,56 +464,89 @@ class OpenlistPlugin(Star):
             existing_gids.add(gid)
             migrated_count += 1
 
-        local_cfg["autobackup_groups"] = combined
-        local_cfg[AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY] = True
-        self.global_config_manager.save_config(local_cfg)
+        self.global_config_manager.save_runtime_fields({
+            "autobackup_groups": combined,
+            AUTOBACKUP_GROUPS_WEBUI_MIGRATION_KEY: True,
+        })
         logger.info(
             f"已完成 WebUI autobackup_groups 一次性迁移: "
             f"webui={len(webui_groups)}, added={migrated_count}, total={len(combined)}"
         )
 
+    def _cleanup_stale_temp_files(self, max_age_seconds: int = 3600):
+        """启动时清理异常中断残留的过期临时文件。"""
+        now = time.time()
+        for dir_name in self.TEMP_DIR_NAMES:
+            target_dir = os.path.join(self.data_dir, dir_name)
+            if not os.path.isdir(target_dir):
+                continue
+            try:
+                for name in os.listdir(target_dir):
+                    fpath = os.path.join(target_dir, name)
+                    if not os.path.isfile(fpath):
+                        continue
+                    if now - os.path.getmtime(fpath) >= max_age_seconds:
+                        try:
+                            os.remove(fpath)
+                        except OSError:
+                            pass
+            except OSError as e:
+                logger.debug(f"扫描临时目录失败: {target_dir}, err={e}")
+
     async def initialize(self):
         """插件初始化"""
         logger.info("Openlist文件管理插件已加载")
+        self._cleanup_stale_temp_files()
         self._migrate_autobackup_groups_from_webui()
         global_cfg = self.get_global_config()
         default_url = global_cfg.get("openlist_url", "")
-        require_auth = global_cfg.get("require_user_auth", True)
+        require_auth = global_cfg.get("require_user_auth", False)
         if not default_url and not require_auth:
-            logger.warning("Openlist URL未配置，请使用 ol config 命令配置或在WebUI中配置")
+            logger.warning("Openlist URL未配置，请使用 ol config set openlist_url <地址> 配置或在WebUI中配置")
 
     def get_user_config_manager(self, user_id: str) -> UserConfigManager:
         """获取用户配置管理器"""
+        user_id = str(user_id)
         if user_id not in self.user_config_managers:
-            self.user_config_managers[user_id] = UserConfigManager("openlist", user_id)
+            if len(self.user_config_managers) >= 500:
+                oldest_uid = next(iter(self.user_config_managers))
+                self.user_config_managers.pop(oldest_uid, None)
+            self.user_config_managers[user_id] = UserConfigManager(PLUGIN_DATA_DIR_NAME, user_id)
         return self.user_config_managers[user_id]
 
     def get_user_config(self, user_id: str) -> Dict:
-        """获取用户配置"""
+        """获取生效配置（全局共享模式返回全局配置；用户独立模式以全局为底叠加用户显式配置）"""
         global_cfg = self.get_global_config()
-        if not global_cfg.get("require_user_auth", True):
+        if not global_cfg.get("require_user_auth", False):
             return global_cfg
 
-        user_config = self.get_user_config_manager(user_id).load_config()
+        user_mgr = self.get_user_config_manager(user_id)
+        raw_user = user_mgr.load_raw_file()
+        if not raw_user:
+            return global_cfg
 
-        # 简单的合并：用户配置优先，如果用户配置为空则使用全局配置
+        explicit_keys = user_mgr.get_explicit_keys(raw_user)
         final_cfg = global_cfg.copy()
-        for k, v in user_config.items():
-            default_val = self.get_user_config_manager(user_id).default_config.get(k)
-            is_default_value = v == default_val
+        for k, v in raw_user.items():
+            if k == "setup_completed" or k.startswith("_"):
+                continue
+            if k in explicit_keys:
+                final_cfg[k] = v
+                continue
+
+            # 兼容旧版未记录 _explicit_keys 的用户配置文件
+            default_val = user_mgr.default_config.get(k)
+            legacy_default = user_mgr.LEGACY_DEFAULTS.get(k, default_val)
+            is_default_value = (v == default_val) or (v == legacy_default)
             if k == "allowed_extensions":
-                if isinstance(v, str):
-                    normalized_exts = [ext.strip().lower() for ext in v.split(",") if ext.strip()]
-                elif isinstance(v, list):
-                    normalized_exts = [str(ext).strip().lower() for ext in v if str(ext).strip()]
-                else:
-                    normalized_exts = []
-                normalized_exts = [ext if ext.startswith(".") else f".{ext}" for ext in normalized_exts]
-                if set(normalized_exts) == self.LEGACY_ALLOWED_EXTENSIONS:
+                normalized_exts = self._normalize_extension_list(v, key=k)
+                if not normalized_exts:
                     is_default_value = True
-            # 只要用户设置了非默认值，就覆盖全局；允许 0/False/[] 这类有效配置值。
             if not is_default_value:
                 final_cfg[k] = v
+
+        for key in EXTENSION_CONFIG_KEYS:
+            final_cfg[key] = self._normalize_extension_list(final_cfg.get(key), key=key)
 
         return final_cfg
 
@@ -429,25 +554,73 @@ class OpenlistPlugin(Star):
         """验证配置是否有效"""
         return bool(user_config.get("openlist_url"))
 
+    def _prune_navigation_states(self):
+        now = time.time()
+        expired = [
+            key for key, state in self.user_navigation_state.items()
+            if now - state.get("updated_at", now) > self.NAV_STATE_TTL_SECONDS
+        ]
+        for key in expired:
+            self.user_navigation_state.pop(key, None)
+        overflow = len(self.user_navigation_state) - self.MAX_NAV_STATES
+        if overflow > 0:
+            oldest = sorted(
+                self.user_navigation_state,
+                key=lambda k: self.user_navigation_state[k].get("updated_at", 0),
+            )[:overflow]
+            for key in oldest:
+                self.user_navigation_state.pop(key, None)
+
     def _get_user_navigation_state(self, user_id: str) -> Dict:
         """获取用户导航状态"""
+        self._prune_navigation_states()
         if user_id not in self.user_navigation_state:
             self.user_navigation_state[user_id] = {
                 "current_path": "/",
+                "display_title": None,
+                "is_search": False,
                 "items": [],
                 "parent_paths": [],
                 "current_page": 1,
+                "updated_at": time.time(),
             }
-        return self.user_navigation_state[user_id]
+        state = self.user_navigation_state[user_id]
+        state["updated_at"] = time.time()
+        return state
 
-    def _update_user_navigation_state(self, user_id: str, path: str, items: List[Dict]):
-        """更新用户导航状态"""
+    def _update_user_navigation_state(
+        self,
+        user_id: str,
+        path: str,
+        items: List[Dict],
+        is_search: bool = False,
+        display_title: Optional[str] = None,
+    ):
+        """更新用户导航状态，保持 current_path 始终为真实目录路径，不因搜索标题污染。"""
         nav_state = self._get_user_navigation_state(user_id)
-        if path != nav_state["current_path"]:
-            if self._is_forward_navigation(nav_state["current_path"], path):
-                nav_state["parent_paths"].append(nav_state["current_path"])
-            nav_state["current_path"] = path
+        if is_search or (isinstance(path, str) and path.startswith("🔍 搜索")):
+            nav_state["is_search"] = True
+            nav_state["display_title"] = display_title or path
             nav_state["current_page"] = 1
+            nav_state["items"] = items
+            return
+
+        normalized_path = self._normalize_openlist_path(path)
+        prev_path = self._normalize_openlist_path(nav_state.get("current_path") or "/")
+        was_search = bool(nav_state.get("is_search"))
+        nav_state["is_search"] = False
+        nav_state["display_title"] = None
+
+        if normalized_path != prev_path:
+            if not nav_state["parent_paths"] or nav_state["parent_paths"][-1] != prev_path:
+                nav_state["parent_paths"].append(prev_path)
+                if len(nav_state["parent_paths"]) > 50:
+                    nav_state["parent_paths"] = nav_state["parent_paths"][-50:]
+            nav_state["current_path"] = normalized_path
+            nav_state["current_page"] = 1
+        elif was_search:
+            nav_state["current_page"] = 1
+
         nav_state["items"] = items
 
     def _is_forward_navigation(self, current_path: str, new_path: str) -> bool:
@@ -467,8 +640,7 @@ class OpenlistPlugin(Star):
     def _get_backup_retry_key(self, event: AstrMessageEvent) -> str:
         """按会话和用户定位最近一次手动备份失败项。"""
         user_id = event.get_sender_id()
-        message_obj = getattr(event, "message_obj", None)
-        group_id = getattr(message_obj, "group_id", None)
+        group_id = self._get_event_group_id(event)
         if group_id:
             return f"group:{group_id}:user:{user_id}"
         return f"private:user:{user_id}"
@@ -476,7 +648,7 @@ class OpenlistPlugin(Star):
     def _get_backup_retry_file(self, retry_key: str) -> str:
         """返回备份失败清单临时文件路径。"""
         safe_key = "".join(c if c.isalnum() or c in "._-" else "_" for c in retry_key)
-        retry_dir = os.path.join(StarTools.get_data_dir("openlist"), "backup_retry")
+        retry_dir = os.path.join(self.data_dir, "backup_retry")
         os.makedirs(retry_dir, exist_ok=True)
         return os.path.join(retry_dir, f"{safe_key}.json")
 
@@ -583,10 +755,15 @@ class OpenlistPlugin(Star):
 
     def _format_file_size(self, size: int) -> str:
         """格式化文件大小"""
-        if size < 1024: return f"{size}B"
-        elif size < 1024 * 1024: return f"{size / 1024:.1f}KB"
-        elif size < 1024 * 1024 * 1024: return f"{size / (1024 * 1024):.1f}MB"
-        else: return f"{size / (1024 * 1024 * 1024):.1f}GB"
+        size = size or 0
+        if size < 1024:
+            return f"{size}B"
+        elif size < 1024 * 1024:
+            return f"{size / 1024:.1f}KB"
+        elif size < 1024 * 1024 * 1024:
+            return f"{size / (1024 * 1024):.1f}MB"
+        else:
+            return f"{size / (1024 * 1024 * 1024):.1f}GB"
 
     def _get_wake_prefixes(self) -> List[str]:
         """读取 AstrBot 唤醒前缀，用于识别根指令时剥离外层唤醒词。"""
@@ -622,6 +799,15 @@ class OpenlistPlugin(Star):
                 return message[len(prefix):].strip()
         return message
 
+    def _is_openlist_command_message(self, event: AstrMessageEvent) -> bool:
+        """判断当前消息是否是发送给本插件的 ol / 网盘 命令消息。"""
+        raw = (getattr(event, "message_str", "") or "").strip()
+        if not raw:
+            return False
+        stripped = self._strip_wake_prefix(raw)
+        first_token = stripped.split(maxsplit=1)[0].lower() if stripped else ""
+        return first_token in ("ol", "网盘")
+
     def _format_usage_tip(self, title: str, usage: str, examples: List[str] = None, note: str = "") -> str:
         """生成简短、可读的命令用法提示。"""
         lines = [f"❌ {title}", "", f"用法：{usage}"]
@@ -636,43 +822,44 @@ class OpenlistPlugin(Star):
         """生成配置命令操作提示。"""
         return self._format_usage_tip(
             title,
-            "ol config <show|setup|set|test|clear_cache>",
+            "ol config <show|setup|set|unset|test|clear_cache>",
             [
                 "ol config show",
                 "ol config setup",
                 "ol config set openlist_url http://127.0.0.1:5244",
                 "ol config test",
             ],
-            "set 用于修改配置项；show 用于查看当前配置。",
+            "全局共享模式下管理员执行 set 会直接修改全局配置；个人模式下可用 unset 恢复默认继承。",
         )
 
     def _format_backup_usage_tip(self, title: str = "备份指令用法错误") -> str:
         """生成手动备份命令提示。"""
         return self._format_usage_tip(
             title,
-            "ol backup [@群号] [/OpenList目标路径] 或 ol backup retry",
+            "ol backup [@群号|private:@QQ号] [/OpenList目标路径] 或 ol backup retry",
             [
                 "ol backup",
-                "ol backup /backup/group_123456",
+                "ol backup /backup/my_files",
                 "ol backup @123456 /backup/group_123456",
                 "ol backup retry",
             ],
-            "路径必须以 / 开头，群号必须以 @ 开头；私聊中备份时必须指定 @群号。",
+            "群聊默认备份当前群文件及最近闪传；私聊不带 @群号 时备份当前私聊文件及闪传。",
         )
 
     def _format_autobackup_usage_tip(self, title: str = "自动备份指令用法错误") -> str:
         """生成自动备份命令提示。"""
         return self._format_usage_tip(
             title,
-            "ol autobackup <show|enable|disable|cancel> [@群号] [/OpenList目标路径]",
+            "ol autobackup <show|enable|disable|cancel> [@群号|private:@QQ号] [/OpenList目标路径]",
             [
                 "ol autobackup show",
                 "ol autobackup enable",
                 "ol autobackup enable @123456 /backup/group_123456",
+                "ol autobackup enable private:@987654 /backup/private_987654",
                 "ol autobackup disable @123456",
                 "ol autobackup cancel @123456",
             ],
-            "enable 可指定路径；disable/cancel 不需要路径。私聊中配置时必须指定 @群号。",
+            "群聊未带参数时操作当前群，私聊未带参数时操作当前私聊；支持群文件、私聊文件与 QQ 闪传自动备份。",
         )
 
     def _format_restore_usage_tip(self, title: str = "恢复指令用法错误") -> str:
@@ -692,33 +879,58 @@ class OpenlistPlugin(Star):
         """生成最近附件上传命令提示。"""
         return self._format_usage_tip(
             title,
-            "先发送图片、视频或文件，再在 5 分钟内发送 ol upload [OpenList目标目录]",
+            "先发送图片、视频、群/私聊文件或 QQ 闪传，再在 5 分钟内发送 ol upload [目标目录]；或直接发送 ol upload [目标目录] <闪传链接>",
             [
                 "ol upload",
                 "ol upload /movies",
-                "ol upload clips",
+                "ol upload /archive https://qfile.qq.com/q/xxxx",
             ],
-            "只会使用同一会话、同一发送者最近 5 分钟内的最近一条附件消息。",
+            "支持群聊文件、私聊离线文件以及 QQ 闪传多文件（自动保留子目录结构）转存。",
         )
 
-    def _sanitize_filename(self, filename: str, fallback: str = "file") -> str:
-        """生成可用于临时附件名的文件名片段。"""
-        safe_name = "".join(c for c in (filename or "") if c.isalnum() or c in "._- ").strip(" .")
-        return (safe_name[:100] or fallback)
+    def _sanitize_filename(self, filename: str, fallback: str = "file", max_length: int = 100) -> str:
+        """生成可用于本地临时附件名的安全文件名片段，并保留文件扩展名。"""
+        raw = (filename or "").replace("\\", "/").split("/")[-1]
+        stem_raw, ext_raw = os.path.splitext(raw)
+        safe_ext = "".join(c for c in ext_raw if c.isalnum() or c in "._-").strip(" ")
+        if safe_ext and not safe_ext.startswith("."):
+            safe_ext = "." + safe_ext
+        if len(safe_ext) > 24:
+            stem_raw = raw
+            safe_ext = ""
+
+        safe_stem = "".join(c for c in stem_raw if c.isalnum() or c in "._- ").strip(" .")
+        if not safe_stem:
+            safe_stem = fallback
+
+        keep_len = max(1, max_length - len(safe_ext))
+        safe_stem = safe_stem[:keep_len].rstrip(" .") or fallback[:keep_len]
+        return f"{safe_stem}{safe_ext}"
+
+    def _sanitize_remote_filename(self, filename: str, fallback: str = "file", max_length: int = 180) -> str:
+        """清洗 OpenList 远端存储目标文件名，保留合法括号/标点与完整扩展名。"""
+        return sanitize_remote_filename(filename, fallback=fallback, max_length=max_length)
 
     def _unique_suffix(self) -> str:
         """生成临时文件名后缀，避免同一秒内并发请求撞名。"""
         return f"{time.time_ns()}_{uuid.uuid4().hex[:12]}"
 
-    def _render_backup_path(self, path_template: str, group_id) -> str:
-        """渲染备份目录模板，支持 {group_id}、{gid}、{group} 占位符。"""
-        group_id = str(group_id)
-        template = (path_template or "").strip() or f"/backup/group_{group_id}"
+    def _render_backup_path(self, path_template: str, group_id="", user_id="") -> str:
+        """渲染备份目录模板，支持 {group_id}/{gid}/{group} 与 {user_id}/{uid}/{sender_id} 占位符。"""
+        gid_str = str(group_id or "")
+        uid_str = str(user_id or "")
+        if not (path_template or "").strip():
+            template = f"/backup/group_{gid_str}" if gid_str else f"/backup/private_{uid_str or 'unknown'}"
+        else:
+            template = path_template.strip()
         rendered = (
             template
-            .replace("{group_id}", group_id)
-            .replace("{gid}", group_id)
-            .replace("{group}", group_id)
+            .replace("{group_id}", gid_str)
+            .replace("{gid}", gid_str)
+            .replace("{group}", gid_str)
+            .replace("{user_id}", uid_str)
+            .replace("{uid}", uid_str)
+            .replace("{sender_id}", uid_str)
         )
         return self._normalize_openlist_path(rendered)
 
@@ -740,14 +952,53 @@ class OpenlistPlugin(Star):
                 gid = item
                 path = ""
             if gid == group_id:
-                return self._render_backup_path(path or default_path, group_id)
+                return self._render_backup_path(path or default_path, group_id=group_id)
         return None
 
-    async def _cleanup_temp_file(self, file_path: str, delay: int = 10):
-        """延迟清理已发送的临时文件。"""
-        await asyncio.sleep(delay)
+    def _get_private_autobackup_target_path(self, global_cfg: Dict, user_id: str) -> Optional[str]:
+        """从自动备份私聊用户配置中解析目标路径（支持指定用户 ID 或 * 通配）。"""
+        user_id = str(user_id)
+        default_path = global_cfg.get("private_autobackup_default_path", "/backup/private_{user_id}")
+        wildcard_path = None
+        for item in global_cfg.get("autobackup_private_users", []):
+            if not isinstance(item, str):
+                continue
+            item = item.strip()
+            if not item:
+                continue
+            if ":" in item:
+                uid, path = item.split(":", 1)
+                uid = uid.strip()
+                path = path.strip()
+            else:
+                uid = item
+                path = ""
+            if uid == user_id:
+                return self._render_backup_path(path or default_path, user_id=user_id)
+            if uid in ("*", "all") and wildcard_path is None:
+                wildcard_path = self._render_backup_path(path or default_path, user_id=user_id)
+        return wildcard_path
+
+    def _compute_temp_cleanup_delay(self, file_path: str, base_delay: int = 15) -> int:
+        """根据文件大小动态计算发送后延迟删除时间，避免大文件被 OneBot 读取中途误删。"""
         try:
-            if os.path.exists(file_path):
+            size_bytes = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
+        except OSError:
+            size_bytes = 0
+        size_mb = size_bytes / (1024 * 1024)
+        if size_mb <= 1:
+            return max(10, base_delay)
+        return min(600, max(30, int(size_mb * 2) + base_delay))
+
+    async def _cleanup_temp_file(self, file_path: str, delay: Optional[int] = None):
+        """延迟清理已发送的临时文件。"""
+        wait_seconds = delay if delay is not None else self._compute_temp_cleanup_delay(file_path)
+        try:
+            await asyncio.sleep(wait_seconds)
+        except asyncio.CancelledError:
+            pass
+        try:
+            if file_path and os.path.exists(file_path):
                 os.remove(file_path)
         except OSError as e:
             logger.debug(f"清理临时文件失败: {file_path}, err={e}")
@@ -778,7 +1029,7 @@ class OpenlistPlugin(Star):
         download_url: str,
     ):
         """将下载链接写入 txt 附件发送，避免长文本被平台转为图片。"""
-        links_dir = os.path.join(StarTools.get_data_dir("openlist"), "links")
+        links_dir = os.path.join(self.data_dir, "links")
         os.makedirs(links_dir, exist_ok=True)
         safe_base = self._sanitize_filename(file_name, "download")
         attachment_name = f"{safe_base}_download_link.txt"
@@ -798,31 +1049,29 @@ class OpenlistPlugin(Star):
 
         yield event.plain_result(f"✅ 已获取下载链接，正在作为 txt 文件发送: {file_name}")
         yield event.chain_result([File(name=attachment_name, file=temp_file_path)])
-        asyncio.create_task(self._cleanup_temp_file(temp_file_path))
+        self._spawn_background_task(self._cleanup_temp_file(temp_file_path, delay=20))
 
     def _format_file_list(self, files: List[Dict], current_path: str, user_config: Dict, user_id: str = None) -> str:
         """格式化文件列表或搜索结果"""
-        is_search_result = current_path.startswith("🔍 搜索")
-        title = f"📁 {current_path}" if not is_search_result else current_path
-
-        if not files: return f"{title}\n\n❌ 列表为空"
-
         nav_state = self._get_user_navigation_state(user_id)
-        current_page = nav_state.get("current_page", 1)
-        max_files_per_page = user_config.get("max_display_files", 20)
+        display_header = nav_state.get("display_title") or current_path
+        is_search_result = bool(nav_state.get("is_search")) or str(display_header).startswith("🔍 搜索")
+        title = f"📁 {display_header}" if not is_search_result else str(display_header)
+
+        if not files:
+            return f"{title}\n\n❌ 列表为空"
+
+        max_files_per_page = max(1, int(user_config.get("max_display_files", 20) or 20))
         total_items = len(files)
-        total_pages = (total_items + max_files_per_page - 1) // max_files_per_page
+        total_pages = max(1, (total_items + max_files_per_page - 1) // max_files_per_page)
+        current_page = min(max(1, int(nav_state.get("current_page", 1) or 1)), total_pages)
+        nav_state["current_page"] = current_page
+
         start_index = (current_page - 1) * max_files_per_page
         end_index = start_index + max_files_per_page
         items_to_display = files[start_index:end_index]
 
         result = f"{title}\n\n"
-
-        dirs_count = 0
-        files_only_count = 0
-        if not is_search_result:
-            dirs_count = len([f for f in files if f.get("is_dir", False)])
-            files_only_count = total_items - dirs_count
 
         for i, item in enumerate(items_to_display, start=start_index + 1):
             name = item.get("name", "")
@@ -830,16 +1079,24 @@ class OpenlistPlugin(Star):
             modified = item.get("modified", "")
             is_dir = item.get("is_dir", False)
 
-            if is_dir: icon = "📂"
+            if is_dir:
+                icon = "📂"
             else:
                 ext = os.path.splitext(name)[1].lower()
-                if ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp"]: icon = "🖼️"
-                elif ext in [".mp4", ".avi", ".mkv", ".mov"]: icon = "🎬"
-                elif ext in [".mp3", ".wav", ".flac", ".aac"]: icon = "🎵"
-                elif ext in [".pdf"]: icon = "📄"
-                elif ext in [".doc", ".docx"]: icon = "📝"
-                elif ext in [".zip", ".rar", ".7z"]: icon = "📦"
-                else: icon = "📄"
+                if ext in [".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp"]:
+                    icon = "🖼️"
+                elif ext in [".mp4", ".avi", ".mkv", ".mov", ".flv"]:
+                    icon = "🎬"
+                elif ext in [".mp3", ".wav", ".flac", ".aac", ".ogg"]:
+                    icon = "🎵"
+                elif ext in [".pdf"]:
+                    icon = "📄"
+                elif ext in [".doc", ".docx"]:
+                    icon = "📝"
+                elif ext in [".zip", ".rar", ".7z", ".tar", ".gz"]:
+                    icon = "📦"
+                else:
+                    icon = "📄"
 
             result += f"{i:2d}. {icon} {name}{'/' if is_dir else ''}\n"
 
@@ -855,7 +1112,7 @@ class OpenlistPlugin(Star):
                 if not is_dir or size > 0:
                     extra_info.append(f"💾 {self._format_file_size(size)}")
 
-                modified_date_part = modified.split('T')[0] if modified else ''
+                modified_date_part = modified.split("T")[0] if modified else ""
                 if modified_date_part:
                     extra_info.append(f"📅 {modified_date_part}")
 
@@ -866,36 +1123,55 @@ class OpenlistPlugin(Star):
         if is_search_result:
             result += f" | 📊 总计: {total_items} 个结果"
         else:
-            dirs_count = len([f for f in files if f.get("is_dir", False)])
+            dirs_count = sum(1 for f in files if f.get("is_dir", False))
             files_only_count = total_items - dirs_count
             result += f" | 📊 总计: {dirs_count} 个文件夹, {files_only_count} 个文件"
 
-        result += f"\n\n💡 快速导航:"
-        result += f"\n\n   • ol ls 序号 - 进入目录/获取链接"
-        result += f"\n\n   • ol download 序号 - 下载并发送文件"
-        if not is_search_result:
-             result += f"\n\n   • ol quit - 返回上级目录"
+        result += "\n\n💡 快速导航:"
+        result += "\n\n   • ol ls 序号 - 进入目录/获取链接"
+        result += "\n\n   • ol download 序号 - 下载并发送文件"
+        result += "\n\n   • ol quit - 返回上级目录"
         if total_pages > 1:
-            result += f"\n   • ol prev - ⬅️ 上一页"
-            result += f"\n   • ol next - ➡️ 下一页"
+            result += "\n   • ol prev - ⬅️ 上一页"
+            result += "\n   • ol next - ➡️ 下一页"
         return result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=3)
     async def remember_recent_upload_message(self, event: AstrMessageEvent):
-        """记录最近附件消息，供 ol upload 使用。"""
+        """记录最近附件与闪传消息，供 ol upload 与私聊备份使用。"""
         await self.upload_service.remember_uploadable_message(event)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=2)
     async def handle_group_file_upload(self, event: AstrMessageEvent):
-        """处理群文件上传事件（自动备份）"""
+        """处理群聊/私聊文件与闪传上传事件（自动备份）"""
         return await self.backup_service.handle_group_file_upload(event)
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=100000)
     async def handle_openlist_root_help(self, event: AstrMessageEvent):
-        """拦截 ol 根指令，避免展示框架生成的参数树。"""
-        message = self._strip_wake_prefix((event.message_str or "").strip())
+        """拦截已唤醒的 ol 根指令，避免展示框架生成的参数树，同时不误伤普通聊天。"""
+        raw_message = (event.message_str or "").strip()
+        if not raw_message:
+            return
+        lower_raw = raw_message.lower()
+        if "ol" not in lower_raw and "网盘" not in raw_message:
+            return
+
+        is_woken = getattr(event, "is_at_or_wake_command", None)
+        if is_woken is False:
+            return
+        wake_prefixes = self._get_wake_prefixes()
+        if is_woken is None and wake_prefixes and self._get_event_group_id(event):
+            if not any(raw_message.startswith(prefix) for prefix in wake_prefixes):
+                return
+
+        message = raw_message
+        for prefix in wake_prefixes:
+            if message.startswith(prefix):
+                message = message[len(prefix):].strip()
+                break
         if message not in ("ol", "网盘"):
             return
+
         event.stop_event()
         async for result in self.help_service.help_command(event):
             yield result
@@ -949,7 +1225,7 @@ class OpenlistPlugin(Star):
 
     @openlist_group.command("info", alias=["信息"])
     async def file_info(self, event: AstrMessageEvent, path: str = ""):
-        """查看文件或目录信息。示例：ol info /docs/report.pdf"""
+        """查看文件或目录信息。示例：ol info /docs/report.pdf 或 ol info 1"""
         async for result in self.browse_service.file_info(event, path):
             yield result
 
@@ -970,18 +1246,19 @@ class OpenlistPlugin(Star):
             yield result
 
     @openlist_group.command("upload", alias=["上传"])
-    async def upload_command(self, event: AstrMessageEvent, target: str = ""):
-        """上传最近附件消息。
+    async def upload_command(self, event: AstrMessageEvent, target: str = "", extra: str = ""):
+        """上传最近附件消息、私聊文件或 QQ 闪传多文件。
         示例：
-          先发送图片、视频或文件
+          先发送图片、视频、文件或闪传卡片
           ol upload /movies
+          ol upload /archive https://qfile.qq.com/q/xxxx
         """
-        async for result in self.upload_service.upload_command(event, target):
+        async for result in self.upload_service.upload_command(event, target, extra):
             yield result
 
     @openlist_group.command("backup", alias=["备份"])
     async def backup_command(self, event: AstrMessageEvent, path: str = "", group: str = ""):
-        """备份群文件。
+        """备份群聊文件、私聊文件或闪传文件。
         示例：
           ol backup
           ol backup @123456 /backup/group_123456
@@ -991,7 +1268,7 @@ class OpenlistPlugin(Star):
 
     @openlist_group.command("autobackup", alias="自动备份")
     async def autobackup_command(self, event: AstrMessageEvent, action: str = "show", target: str = "", path: str = ""):
-        """配置自动备份。
+        """配置群聊或私聊自动备份。
         示例：
           ol autobackup show
           ol autobackup enable @123456 /backup
@@ -1047,5 +1324,14 @@ class OpenlistPlugin(Star):
             yield result
 
     async def terminate(self):
-        """插件卸载时执行的清理操作"""
+        """插件卸载时执行的清理操作：停止正在执行的首次全量备份并回收后台任务"""
+        for cancel_evt in list(self.backup_service._autobackup_full_cancel_events.values()):
+            cancel_evt.set()
+        pending = [t for t in list(self._background_tasks) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        self._background_tasks.clear()
+        OpenlistClient.clear_token_cache()
         logger.info("OpenList助手已卸载")

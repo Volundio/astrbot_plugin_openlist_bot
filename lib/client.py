@@ -1,11 +1,12 @@
-import os
 import asyncio
+import os
 import posixpath
 import socket
 import time
-import aiohttp
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
+
+import aiohttp
 from astrbot.api import logger
 
 
@@ -143,6 +144,9 @@ class ProgressStreamPayload(aiohttp.Payload):
 class OpenlistClient:
     """Openlist API 客户端"""
 
+    _TOKEN_CACHE: Dict[Tuple[str, str, str], Tuple[str, float]] = {}
+    _TOKEN_TTL_SECONDS = 6 * 3600
+
     def __init__(
         self,
         base_url: str,
@@ -157,10 +161,43 @@ class OpenlistClient:
         self.public_base_url = public_base_url.rstrip("/") if public_base_url else ""
         self.username = username
         self.password = password
+        self._explicit_token = bool(token)
         self.token = token
         self.fixed_base_directory = fixed_base_directory
         self.transfer_config = self._build_transfer_config(transfer_config)
         self.session = None
+
+    @classmethod
+    def clear_token_cache(cls):
+        cls._TOKEN_CACHE.clear()
+
+    def _token_cache_key(self) -> Optional[Tuple[str, str, str]]:
+        if self._explicit_token or not (self.username and self.password):
+            return None
+        return (self.base_url, self.username, self.password)
+
+    def _get_cached_token(self) -> Optional[str]:
+        key = self._token_cache_key()
+        if not key:
+            return None
+        cached = self._TOKEN_CACHE.get(key)
+        if not cached:
+            return None
+        token_val, expires_at = cached
+        if time.monotonic() >= expires_at:
+            self._TOKEN_CACHE.pop(key, None)
+            return None
+        return token_val
+
+    def _set_cached_token(self, token_val: str):
+        key = self._token_cache_key()
+        if key and token_val:
+            self._TOKEN_CACHE[key] = (token_val, time.monotonic() + self._TOKEN_TTL_SECONDS)
+
+    def _invalidate_cached_token(self):
+        key = self._token_cache_key()
+        if key:
+            self._TOKEN_CACHE.pop(key, None)
 
     def _build_transfer_config(self, transfer_config: Optional[Dict]) -> Dict:
         config = DEFAULT_TRANSFER_CONFIG.copy()
@@ -223,6 +260,16 @@ class OpenlistClient:
         """Return OpenList auth headers for API requests."""
         return {"Authorization": self.token} if self.token else {}
 
+    async def _maybe_refresh_token_and_retry(self, http_status: int, api_code=None) -> bool:
+        """If using username/password login and token expired (401), re-login once."""
+        if self._explicit_token or not (self.username and self.password):
+            return False
+        if http_status != 401 and api_code != 401:
+            return False
+        self._invalidate_cached_token()
+        self.token = ""
+        return await self.login()
+
     async def _post_api_result(
         self,
         endpoint: str,
@@ -230,34 +277,52 @@ class OpenlistClient:
         action: str,
         context: str = "",
         ok_codes=(200,),
+        log_error: bool = True,
     ) -> Optional[Dict]:
         """POST to an OpenList API endpoint and return the decoded JSON result."""
-        try:
-            async with self.session.post(
-                f"{self.base_url}{endpoint}",
-                json=payload,
-                headers=self._auth_headers(),
-            ) as resp:
-                if resp.status != 200:
-                    error_text = await resp.text()
-                    logger.error(f"{action}失败 - HTTP状态: {resp.status}, 响应: {error_text}{context}")
-                    return None
+        for attempt in range(2):
+            try:
+                async with self.session.post(
+                    f"{self.base_url}{endpoint}",
+                    json=payload,
+                    headers=self._auth_headers(),
+                ) as resp:
+                    if resp.status == 401 and attempt == 0 and await self._maybe_refresh_token_and_retry(401):
+                        continue
+                    if resp.status != 200:
+                        error_text = await resp.text()
+                        if log_error:
+                            logger.error(f"{action}失败 - HTTP状态: {resp.status}, 响应: {error_text}{context}")
+                        return None
 
-                result = await resp.json()
-                if result.get("code") not in ok_codes:
-                    logger.error(
-                        f"{action}失败 - code: {result.get('code')}, "
-                        f"message: {result.get('message', '未知错误')}{context}"
-                    )
-                return result
-        except Exception as e:
-            logger.error(f"{action}失败: {e}{context}", exc_info=True)
-            return None
+                    result = await resp.json()
+                    code = result.get("code")
+                    if code == 401 and attempt == 0 and await self._maybe_refresh_token_and_retry(200, 401):
+                        continue
+                    if code not in ok_codes and log_error:
+                        logger.error(
+                            f"{action}失败 - code: {code}, "
+                            f"message: {result.get('message', '未知错误')}{context}"
+                        )
+                    return result
+            except Exception as e:
+                if log_error:
+                    logger.error(f"{action}失败: {e}{context}", exc_info=True)
+                return None
+        return None
 
     async def __aenter__(self):
-        self.session = aiohttp.ClientSession()
+        default_timeout = aiohttp.ClientTimeout(
+            total=120,
+            sock_connect=self.transfer_config["openlist_connect_timeout"],
+        )
+        self.session = aiohttp.ClientSession(timeout=default_timeout)
         if not self.token and self.username and self.password:
-            await self.login()
+            cached = self._get_cached_token()
+            if cached:
+                self.token = cached
+            else:
+                await self.login()
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -276,6 +341,7 @@ class OpenlistClient:
                     result = await resp.json()
                     if result.get("code") == 200:
                         self.token = result.get("data", {}).get("token", "")
+                        self._set_cached_token(self.token)
                         return True
                     else:
                         logger.error(f"OpenList登录失败 - code: {result.get('code')}, message: {result.get('message', '未知错误')}, 用户名: {self.username}")
@@ -289,9 +355,14 @@ class OpenlistClient:
             return False
 
     async def list_files(
-        self, path: str = "/", page: int = 1, per_page: int = 30, refresh: bool = False
+        self,
+        path: str = "/",
+        page: int = 1,
+        per_page: int = 0,
+        refresh: bool = False,
+        log_error: bool = True,
     ) -> Optional[Dict]:
-        """获取文件列表"""
+        """获取文件列表；默认 per_page=0 获取全部条目供前端会话分页。"""
         result = await self._post_api_result(
             "/api/fs/list",
             {
@@ -303,18 +374,20 @@ class OpenlistClient:
             },
             "获取文件列表",
             f", 路径: {path}",
+            log_error=log_error,
         )
         if result and result.get("code") == 200:
             return result.get("data")
         return None
 
-    async def get_file_info(self, path: str) -> Optional[Dict]:
+    async def get_file_info(self, path: str, log_error: bool = True) -> Optional[Dict]:
         """获取文件信息"""
         result = await self._post_api_result(
             "/api/fs/get",
             {"path": path, "password": ""},
             "获取文件信息",
             f", 路径: {path}",
+            log_error=log_error,
         )
         if result and result.get("code") == 200:
             return result.get("data")
@@ -339,16 +412,33 @@ class OpenlistClient:
             return content if content is not None else []
         return []
 
-    async def get_download_url(self, path: str, prefer_public: bool = True) -> Optional[str]:
+    def _rewrite_public_url(self, raw_url: str) -> str:
+        """Rewrite OpenList self-hosted /d/ or /p/ URLs to public_base_url when configured."""
+        if not self.public_base_url or not raw_url:
+            return raw_url
+        if raw_url.startswith(self.base_url):
+            return self.public_base_url + raw_url[len(self.base_url):]
+        parsed_raw = urlparse(raw_url)
+        parsed_base = urlparse(self.base_url)
+        if (
+            parsed_raw.path.startswith(("/d/", "/p/"))
+            and parsed_raw.hostname in (parsed_base.hostname, "localhost", "127.0.0.1", "0.0.0.0")
+        ):
+            suffix = parsed_raw.path
+            if parsed_raw.query:
+                suffix = f"{suffix}?{parsed_raw.query}"
+            return f"{self.public_base_url}{suffix}"
+        return raw_url
+
+    async def get_download_url(self, path: str, prefer_public: bool = True, file_info: Optional[Dict] = None) -> Optional[str]:
         """获取文件下载链接"""
-        file_info = await self.get_file_info(path)
+        if file_info is None:
+            file_info = await self.get_file_info(path)
 
         if file_info and not file_info.get("is_dir", True):
             raw_url = file_info.get("raw_url")
             if raw_url:
-                if prefer_public and self.public_base_url and raw_url.startswith(self.base_url):
-                    return self.public_base_url + raw_url[len(self.base_url):]
-                return raw_url
+                return self._rewrite_public_url(raw_url) if prefer_public else raw_url
 
             sign = file_info.get("sign")
             base_url_to_use = self.public_base_url if prefer_public and self.public_base_url else self.base_url
@@ -380,35 +470,21 @@ class OpenlistClient:
                 return {"url": file_info["raw_url"], "header": {}}
             return None
 
-        try:
-            headers = {}
-            if self.token:
-                headers["Authorization"] = self.token
-
-            link_data = {"path": raw_path}
-            async with self.session.post(
-                f"{self.base_url}/api/fs/link", json=link_data, headers=headers
-            ) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    if result.get("code") == 200:
-                        data = result.get("data") or {}
-                        if data.get("url"):
-                            return data
-                        logger.error(f"获取真实下载链接失败 - 响应缺少 url: {result}, 路径: {path}, raw_path: {raw_path}")
-                        return await fallback_to_raw_url("响应缺少 url")
-                    logger.error(
-                        f"获取真实下载链接失败 - code: {result.get('code')}, "
-                        f"message: {result.get('message', '未知错误')}, 路径: {path}, raw_path: {raw_path}"
-                    )
-                    return await fallback_to_raw_url(result.get("message", "接口返回错误"))
-
-                error_text = await resp.text()
-                logger.error(f"获取真实下载链接失败 - HTTP状态: {resp.status}, 响应: {error_text}, 路径: {path}, raw_path: {raw_path}")
-                return await fallback_to_raw_url(f"HTTP {resp.status}")
-        except Exception as e:
-            logger.error(f"获取真实下载链接失败: {e}, 路径: {path}, raw_path: {raw_path}", exc_info=True)
-            return await fallback_to_raw_url(str(e))
+        result = await self._post_api_result(
+            "/api/fs/link",
+            {"path": raw_path},
+            "获取真实下载链接",
+            f", 路径: {path}, raw_path: {raw_path}",
+        )
+        if result is None:
+            return await fallback_to_raw_url("请求失败")
+        if result.get("code") == 200:
+            data = result.get("data") or {}
+            if data.get("url"):
+                return data
+            logger.error(f"获取真实下载链接失败 - 响应缺少 url: {result}, 路径: {path}, raw_path: {raw_path}")
+            return await fallback_to_raw_url("响应缺少 url")
+        return await fallback_to_raw_url(result.get("message", "接口返回错误"))
 
     async def upload_file(
         self, file_path: str, target_path: str, filename: str = None
@@ -677,12 +753,16 @@ class OpenlistClient:
                     if result.get("code") == 200:
                         logger.info(f"流式上传完成: {filename} -> {target_path}")
                         return True
+                    if result.get("code") == 401:
+                        self._invalidate_cached_token()
                     logger.error(
                         f"上传失败，服务器返回错误 - code: {result.get('code')}, "
                         f"message: {result.get('message', '未知错误')}, 完整响应: {result}"
                     )
                     return False
 
+                if response.status == 401:
+                    self._invalidate_cached_token()
                 error_text = await response.text()
                 logger.error(
                     f"上传失败 - HTTP状态: {response.status}, 响应内容: {error_text}, "
@@ -697,7 +777,7 @@ class OpenlistClient:
             )
             return False
 
-    async def mkdir(self, path: str) -> bool:
+    async def mkdir(self, path: str, log_error: bool = True) -> bool:
         """在Openlist创建目录"""
         result = await self._post_api_result(
             "/api/fs/mkdir",
@@ -705,23 +785,48 @@ class OpenlistClient:
             "创建目录",
             f", 路径: {path}",
             ok_codes=(200, 405),
+            log_error=log_error,
         )
-        # 405 可能表示目录已存在，通常也视为成功
-        return bool(result and result.get("code") in (200, 405))
+        # 405 可能表示虚拟根/目录已存在
+        if result and result.get("code") in (200, 405):
+            return True
+        if result and "exist" in str(result.get("message") or "").lower():
+            return True
+        return False
 
     async def ensure_dir(self, path: str) -> bool:
-        """逐级创建目录，兼容父目录不存在的目标路径。"""
-        normalized = (path or "/").strip().replace("\\", "/")
-        if not normalized or normalized == "/":
+        """检查并创建缺失目录，避免对挂载点根目录或已存在目录盲目调用 mkdir。"""
+        normalized = self._normalize_path(path)
+        if normalized == "/":
             return True
-        if not normalized.startswith("/"):
-            normalized = "/" + normalized
+
+        existing = await self.get_file_info(normalized, log_error=False)
+        if existing:
+            return bool(existing.get("is_dir", False))
+
+        # 自底向上寻找最近一个已存在的父目录（例如挂载点 /夸克），避免从 / 开始盲调 mkdir
         parts = [part for part in normalized.strip("/").split("/") if part]
-        current = ""
-        for part in parts:
-            current = f"{current}/{part}"
-            if not await self.mkdir(current):
-                return False
+        prefixes = ["/" + "/".join(parts[: idx + 1]) for idx in range(len(parts))]
+
+        first_missing_idx = 0
+        for idx in range(len(prefixes) - 2, -1, -1):
+            info = await self.get_file_info(prefixes[idx], log_error=False)
+            if info:
+                if not info.get("is_dir", False):
+                    logger.error(f"目标父路径不是目录: {prefixes[idx]}")
+                    return False
+                first_missing_idx = idx + 1
+                break
+
+        for target in prefixes[first_missing_idx:]:
+            if await self.mkdir(target, log_error=False):
+                continue
+            # 某些存储驱动对已存在或并发创建的目录返回 500，复核目录是否实际已存在
+            recheck = await self.get_file_info(target, log_error=False)
+            if recheck and recheck.get("is_dir", False):
+                continue
+            logger.error(f"创建目录失败: {target}")
+            return False
         return True
 
     async def remove(self, dir_path: str, names: List[str]) -> bool:

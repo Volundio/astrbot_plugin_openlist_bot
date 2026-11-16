@@ -1,7 +1,11 @@
 import os
 
 import aiohttp
-import chardet
+
+try:
+    import chardet
+except ImportError:  # pragma: no cover - optional fallback when chardet is absent
+    chardet = None
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
@@ -11,6 +15,33 @@ from .base import PluginService
 
 class PreviewService(PluginService):
     """Preview service."""
+
+    ARCHIVE_EXTENSIONS = {".zip", ".tar", ".gz", ".7z", ".rar", ".bz2", ".xz"}
+    TEXT_EXTENSIONS = {
+        ".txt", ".md", ".log", ".json", ".xml", ".yaml", ".yml", ".ini", ".conf",
+        ".cfg", ".toml", ".py", ".js", ".java", ".c", ".cpp", ".h", ".go", ".rs",
+        ".php", ".rb", ".sh", ".bash", ".html", ".htm", ".css", ".jsx", ".tsx",
+        ".ts", ".vue", ".sql", ".csv", ".properties", ".env",
+    }
+
+    def _decode_preview_bytes(self, content_bytes: bytes) -> str:
+        if not content_bytes:
+            return ""
+        if chardet is not None:
+            try:
+                detection = chardet.detect(content_bytes)
+                encoding = detection.get("encoding") or "utf-8"
+                confidence = detection.get("confidence", 0)
+                logger.debug(f"文本预览编码检测: {encoding}, 置信度: {confidence:.2f}")
+                return content_bytes.decode(encoding, errors="ignore").strip()
+            except (LookupError, UnicodeError, Exception):
+                pass
+        for enc in ("utf-8-sig", "utf-8", "gb18030"):
+            try:
+                return content_bytes.decode(enc).strip()
+            except UnicodeDecodeError:
+                continue
+        return content_bytes.decode("utf-8", errors="ignore").strip()
 
     async def preview_command(self, event: AstrMessageEvent, path: str = ""):
         """预览文件内容"""
@@ -27,8 +58,7 @@ class PreviewService(PluginService):
         nav_key = self._get_navigation_state_key(event)
         user_config = self.get_user_config(user_id)
 
-        # 检查配置
-        max_preview_size_mb = user_config.get("max_preview_size", 0)
+        max_preview_size_mb = int(user_config.get("max_preview_size", 10) or 0)
         if max_preview_size_mb == -1:
             yield event.plain_result(
                 "❌ 预览功能已禁用。\n"
@@ -48,7 +78,6 @@ class PreviewService(PluginService):
             ))
             return
 
-        # 获取文件信息
         item = None
         path_or_num = path
         path_candidates = []
@@ -80,8 +109,12 @@ class PreviewService(PluginService):
         try:
             async with self._create_openlist_client(user_config) as client:
                 if not item:
-                    for candidate_path in path_candidates:
-                        item = await client.get_file_info(candidate_path)
+                    multi = len(path_candidates) > 1
+                    for idx, candidate_path in enumerate(path_candidates):
+                        item = await client.get_file_info(
+                            candidate_path,
+                            log_error=not multi or idx == len(path_candidates) - 1,
+                        )
                         if item:
                             full_path = candidate_path
                             break
@@ -104,7 +137,7 @@ class PreviewService(PluginService):
                         return
 
                 file_name = item.get("name", "")
-                file_size = item.get("size", 0)
+                file_size = item.get("size", 0) or 0
                 ext = os.path.splitext(file_name)[1].lower()
                 if not self._is_extension_allowed(file_name, user_config):
                     yield event.plain_result(
@@ -113,9 +146,8 @@ class PreviewService(PluginService):
                     )
                     return
 
-                # 压缩包预览支持 (使用 API)
-                archive_extensions = [".zip", ".tar", ".gz", ".7z", ".rar", ".bz2", ".xz"]
-                if ext in archive_extensions:
+                # 1. 压缩包预览支持 (使用 API)
+                if ext in self.ARCHIVE_EXTENSIONS:
                     yield event.plain_result(f"🔍 正在读取压缩包内容: {file_name}...")
                     archive_data = await client.list_archive_contents(full_path)
                     if archive_data and "content" in archive_data:
@@ -127,8 +159,8 @@ class PreviewService(PluginService):
                         file_list = []
                         for f in contents:
                             prefix = "📁" if f.get("is_dir") else "📄"
-                            size_str = f" ({f['size'] / 1024:.1f} KB)" if not f.get("is_dir") else ""
-                            file_list.append(f"{prefix} {f['name']}{size_str}")
+                            size_str = f" ({(f.get('size') or 0) / 1024:.1f} KB)" if not f.get("is_dir") else ""
+                            file_list.append(f"{prefix} {f.get('name', '')}{size_str}")
 
                         max_display = 20
                         display_list = file_list[:max_display]
@@ -138,22 +170,27 @@ class PreviewService(PluginService):
 
                         yield event.plain_result(result_text)
                         return
-                    else:
-                        yield event.plain_result(f"❌ 无法读取压缩包内容或该格式暂不支持。")
-                        return
+                    yield event.plain_result("❌ 无法读取压缩包内容或该格式暂不支持。")
+                    return
 
-                # 检查文件大小限制
-                if max_preview_size_mb > 0:
-                    if file_size > max_preview_size_mb * 1024 * 1024:
-                        yield event.plain_result(
-                            f"❌ 文件过大：{file_size / (1024*1024):.2f}MB > {max_preview_size_mb}MB\n"
-                            "请使用 ol ls 获取下载链接。"
-                        )
-                        return
+                # 2. 前置判断文本后缀，避免先完整下载不支持的大文件再报错
+                if ext not in self.TEXT_EXTENSIONS:
+                    yield event.plain_result(
+                        f"❓ 该格式 ({ext or '无扩展名'}) 不在支持的文本或压缩包预览列表中。\n"
+                        "示例：ol preview /data/config.txt\n"
+                        "提示：如需下载该文件，请使用 ol download <路径|序号>。"
+                    )
+                    return
+
+                if max_preview_size_mb > 0 and file_size > max_preview_size_mb * 1024 * 1024:
+                    yield event.plain_result(
+                        f"❌ 文件过大：{file_size / (1024 * 1024):.2f}MB > {max_preview_size_mb}MB\n"
+                        "请使用 ol ls 获取下载链接。"
+                    )
+                    return
 
                 yield event.plain_result(f"🔍 正在获取预览: {file_name}...")
 
-                # 获取真实下载链接
                 link = await client.get_direct_download_link(full_path)
                 if not link:
                     yield event.plain_result("❌ 获取真实下载链接失败，请确认配置账号为 OpenList 管理员或具有 /api/fs/link 权限")
@@ -161,73 +198,36 @@ class PreviewService(PluginService):
                 download_url = link["url"]
                 download_headers = self._normalize_download_headers(link.get("header", {}))
 
-                # 下载到临时目录
-                temp_file_path = self._make_temp_file_path("temp_preview", "preview", file_name)
+                text_length = self._get_positive_int_config(user_config, "text_preview_length", 1000)
+                max_read_bytes = max(4096, text_length * 4)
+                if "Range" not in download_headers and "range" not in download_headers:
+                    download_headers = dict(download_headers)
+                    download_headers["Range"] = f"bytes=0-{max_read_bytes - 1}"
 
-                try:
-                    timeout = aiohttp.ClientTimeout(
-                        total=None,
-                        sock_connect=self._get_positive_int_config(user_config, "upstream_connect_timeout", 60),
-                        sock_read=self._get_positive_int_config(user_config, "upstream_read_timeout", 180),
-                    )
-                    async with aiohttp.ClientSession(timeout=timeout) as session:
-                        async with session.get(download_url, headers=download_headers) as resp:
-                            if resp.status == 200:
-                                with open(temp_file_path, "wb") as f:
-                                    downloaded = 0
-                                    async for chunk in resp.content.iter_chunked(1024 * 1024):
-                                        f.write(chunk)
-                                        downloaded += len(chunk)
-                                        if max_preview_size_mb > 0 and downloaded > max_preview_size_mb * 1024 * 1024:
-                                            yield event.plain_result(
-                                                f"❌ 文件过大：{downloaded / (1024*1024):.2f}MB > {max_preview_size_mb}MB\n"
-                                                "请使用 ol ls 获取下载链接。"
-                                            )
-                                            return
-                            else:
-                                yield event.plain_result(f"❌ 下载文件失败: HTTP {resp.status}")
-                                return
+                timeout = aiohttp.ClientTimeout(
+                    total=60,
+                    sock_connect=self._get_positive_int_config(user_config, "upstream_connect_timeout", 60),
+                    sock_read=self._get_positive_int_config(user_config, "upstream_read_timeout", 180),
+                )
+                buffer = bytearray()
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(download_url, headers=download_headers) as resp:
+                        if resp.status not in (200, 206):
+                            yield event.plain_result(f"❌ 下载文件失败: HTTP {resp.status}")
+                            return
+                        async for chunk in resp.content.iter_chunked(16384):
+                            if not chunk:
+                                continue
+                            remaining = max_read_bytes - len(buffer)
+                            buffer.extend(chunk[:remaining])
+                            if len(buffer) >= max_read_bytes:
+                                break
 
-                    # 仅支持文本预览
-                    text_extensions = [".txt", ".md", ".log", ".json", ".xml", ".yaml", ".yml", ".ini", ".conf", ".cfg", ".toml", ".py", ".js", ".java", ".c", ".cpp", ".h", ".go", ".rs", ".php", ".rb", ".sh", ".bash", ".html", ".htm", ".css", ".jsx", ".tsx", ".ts", ".vue", ".sql", ".csv", ".properties", ".env"]
-
-                    if ext in text_extensions:
-                        text_length = user_config.get("text_preview_length", 1000)
-                        try:
-                            with open(temp_file_path, "rb") as f:
-                                content_bytes = f.read(text_length * 4) # 多读一点以防编码问题
-
-                                # 使用 chardet 检测编码
-                                detection = chardet.detect(content_bytes)
-                                encoding = detection.get('encoding', 'utf-8') or 'utf-8'
-                                confidence = detection.get('confidence', 0)
-                                logger.debug(f"文本预览编码检测: {encoding}, 置信度: {confidence:.2f}")
-
-                                try:
-                                    decoded_text = content_bytes.decode(encoding, errors='ignore').strip()
-                                except (LookupError, UnicodeError):
-                                    # 如果检测出的编码失败，回退到 utf-8
-                                    encoding = 'utf-8'
-                                    decoded_text = content_bytes.decode('utf-8', errors='ignore').strip()
-
-                                preview_text = decoded_text[:text_length]
-                                if len(decoded_text) > text_length:
-                                    preview_text += "\n\n..."
-
-                                yield event.plain_result(f"📝 文本预览:\n---\n{preview_text}")
-                        except Exception as e:
-                            logger.error(f"文本预览失败: {e}")
-                            yield event.plain_result(f"❌ 文本解析失败: {e}")
-                    else:
-                        yield event.plain_result(
-                            f"❓ 该格式 ({ext or '无扩展名'}) 不在支持的文本预览列表中。\n"
-                            "示例：ol preview /data/config.txt\n"
-                            "提示：如需下载该文件，请使用 ol download <路径|序号>。"
-                        )
-
-                finally:
-                    # 清理临时文件
-                    self._remove_file_quietly(temp_file_path, "预览临时文件")
+                decoded_text = self._decode_preview_bytes(bytes(buffer))
+                preview_text = decoded_text[:text_length]
+                if len(decoded_text) > text_length or file_size > len(buffer):
+                    preview_text += "\n\n..."
+                yield event.plain_result(f"📝 文本预览:\n---\n{preview_text}")
 
         except Exception as e:
             logger.error(f"预览失败: {e}", exc_info=True)

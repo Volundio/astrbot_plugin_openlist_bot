@@ -1,6 +1,5 @@
-import asyncio
-import os
-from typing import Dict
+from contextlib import asynccontextmanager
+from typing import Dict, Optional
 
 import aiohttp
 
@@ -14,7 +13,22 @@ from .base import PluginService
 class DownloadService(PluginService):
     """Download service."""
 
-    async def _download_file(self, event: AstrMessageEvent, file_item: Dict, user_config: Dict, full_path_override: str = None):
+    @asynccontextmanager
+    async def _use_or_create_client(self, user_config: Dict, existing_client=None):
+        if existing_client is not None:
+            yield existing_client
+        else:
+            async with self._create_openlist_client(user_config) as client:
+                yield client
+
+    async def _download_file(
+        self,
+        event: AstrMessageEvent,
+        file_item: Dict,
+        user_config: Dict,
+        full_path_override: str = None,
+        client=None,
+    ):
         """下载文件并作为附件发送给用户"""
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
@@ -44,8 +58,8 @@ class DownloadService(PluginService):
             else:
                 file_path = self._get_item_full_path(nav_key, file_item, user_config)
 
-            async with self._create_openlist_client(user_config) as client:
-                link = await client.get_direct_download_link(file_path)
+            async with self._use_or_create_client(user_config, client) as active_client:
+                link = await active_client.get_direct_download_link(file_path)
                 if not link:
                     yield event.plain_result(
                         "❌ 无法获取真实下载链接。\n"
@@ -82,7 +96,7 @@ class DownloadService(PluginService):
                         if response.status == 200:
                             with open(temp_file_path, "wb") as f:
                                 downloaded = 0
-                                async for chunk in response.content.iter_chunked(8192):
+                                async for chunk in response.content.iter_chunked(65536):
                                     f.write(chunk)
                                     downloaded += len(chunk)
                                     if max_download_size_mb > 0 and downloaded > max_download_size:
@@ -95,18 +109,18 @@ class DownloadService(PluginService):
                                     if (
                                         self._get_bool_config(user_config, "debug_transfer_logging", False)
                                         and file_size > 10 * 1024 * 1024
-                                        and downloaded % (10 * 1024 * 1024) < 8192
+                                        and downloaded % (10 * 1024 * 1024) < 65536
                                     ):
                                         progress = (downloaded / file_size) * 100
                                         logger.info(
                                             f"下载进度: {file_name} {progress:.1f}% "
                                             f"({self._format_file_size(downloaded)}/{self._format_file_size(file_size)})"
                                         )
-                            yield event.plain_result(f"✅ 下载完成，正在发送文件...")
+                            yield event.plain_result("✅ 下载完成，正在发送文件...")
                             file_component = File(name=file_name, file=temp_file_path)
                             yield event.chain_result([file_component])
                             sent_file = True
-                            asyncio.create_task(self._cleanup_temp_file(temp_file_path))
+                            self._spawn_background_task(self._cleanup_temp_file(temp_file_path))
                         else:
                             error_text = await response.text()
                             logger.error(f"用户 {user_id} 下载文件失败 - HTTP状态: {response.status}, 响应: {error_text}, 文件: {file_name}, URL: {download_url}")
@@ -118,13 +132,19 @@ class DownloadService(PluginService):
             if temp_file_path and not sent_file:
                 self._remove_file_quietly(temp_file_path, "下载临时文件")
 
-    async def _get_and_send_download_link(self, event: AstrMessageEvent, item: Dict, user_config: Dict, full_path: str = None):
+    async def _get_and_send_download_link(
+        self,
+        event: AstrMessageEvent,
+        item: Dict,
+        user_config: Dict,
+        full_path: Optional[str] = None,
+        client=None,
+    ):
         """获取指定项目的文件链接并发送"""
         user_id = event.get_sender_id()
         nav_key = self._get_navigation_state_key(event)
         yield event.plain_result(f"🔗 正在获取文件链接: {item.get('name', '')}...")
 
-        # 如果提供了 full_path，则直接使用；否则，根据 item 信息构建路径
         if full_path:
             file_path = full_path
         else:
@@ -139,8 +159,9 @@ class DownloadService(PluginService):
             return
 
         try:
-            async with self._create_openlist_client(user_config) as client:
-                download_url = await client.get_download_url(file_path)
+            async with self._use_or_create_client(user_config, client) as active_client:
+                preloaded = item if (item.get("raw_url") or "sign" in item) else None
+                download_url = await active_client.get_download_url(file_path, file_info=preloaded)
                 if download_url:
                     name = item.get("name", "")
                     size = item.get("size", 0)

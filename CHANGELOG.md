@@ -1,5 +1,25 @@
 # 🔄 更新日志
 
+### v1.2.0
+
+* ✨ **功能**:
+  * **OneBot QQ 闪传多文件转存与自动备份**：支持解析 `flashtransfer` 消息段、闪传 JSON 卡片及 `qfile.qq.com` 分享链接，自动拉取文件集列表并保留子目录层级批量转存至 OpenList；支持通过 `ol upload [目标目录] [闪传链接]` 一行指令直接转存，并接入群聊与私聊自动备份。
+  * **私聊文件上传与手动/自动备份**：支持私聊 `file` 消息段（`get_private_file_url` / `get_file`）与 `offline_file` 离线文件通知；私聊可执行 `ol upload`、`ol backup [/目标目录]`（扫描 `get_friend_msg_history` 及离线文件/闪传缓存）及 `ol autobackup enable/disable/cancel`。
+  * **全局共享模式直接修改配置**：WebUI 默认启用全局共享模式（`require_user_auth = false`）；全局共享模式下管理员执行 `ol config set` 会直接更新全局配置并同步至 WebUI，新增 `ol config unset <配置项>` 重置/恢复继承。
+  * `ol info <路径|序号>` 新增支持列表序号查询。
+* 🐛 **修复**:
+  * 修复根指令拦截器未校验唤醒状态，导致群聊普通对话发送“网盘”或 `ol` 时被误拦截的问题。
+  * 修复自动备份未过滤机器人自身上传事件（导致机器人发送的下载链接 txt 与恢复文件被循环备份）及通知+消息双事件重复触发的问题。
+  * 修复用户独立模式下将配置项设为默认值（如 `max_preview_size=0`）无法覆盖全局配置的问题。
+  * 修复 `OpenlistClient.ensure_dir` 对存储挂载点根目录或已存在目录盲目调用 `mkdir` 导致部分驱动报错失败的问题。
+  * 修复 `ol quit` 未重置页码导致返回少文件父目录显示空白页、5 处目录刷新漏传 `per_page=0` 被截断为 30 项，以及 `ol search` 覆盖真实 `current_path` 的问题。
+  * 修复长文件名清洗时截断丢失文件扩展名的问题。
+  * 修复 `ol restore` 调用 `create_group_file_folder` 缺少 `name` 和 `parent_id="/"` 参数，并新增跨 Docker 容器 `base64://` 上传兜底。
+* ⚡ **优化**:
+  * `ol preview` 前置校验支持的文件后缀，改为按预览字节上限流式 `Range` 读取内存解码，避免先下载完整大文件到磁盘；新增 `chardet` 可选降级解码与 `requirements.txt` 依赖声明。
+  * `OpenlistClient` 新增登录 Token 内存缓存与 `401` 自动重登重试，目录缓存按认证作用域共享并支持按路径精确失效。
+  * 全量备份并发调度由固定批次屏障改为 `asyncio.Queue` Worker 池，消除大文件队头阻塞；完善插件卸载 `terminate()` 后台任务回收与启动过期临时文件清理。
+
 ### v1.1.2
 
 * 🐛 **修复**:

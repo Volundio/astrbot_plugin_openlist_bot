@@ -11,9 +11,9 @@ class HelpService(PluginService):
         user_id = event.get_sender_id()
         user_config = self.get_user_config(user_id)
         global_cfg = self.get_global_config()
-        is_user_auth_mode = global_cfg.get("require_user_auth", True)
+        is_user_auth_mode = bool(global_cfg.get("require_user_auth", False))
 
-        help_text = f"""📚 OpenList 助手帮助
+        help_text = """📚 OpenList 助手帮助
 💡 您也可以使用别名 `网盘` 代替 `ol`。
 
 ---
@@ -21,115 +21,78 @@ class HelpService(PluginService):
 ---
 ▶️ `ol ls [路径|序号]`
    - 浏览目录: 列出内容，若文件过多会自动分页。
-     - 示例: `ol ls`
-     - 示例: `ol ls /movies`
-   - 进入子目录:
-     - 示例: `ol ls 1` (如果1是目录)
-   - 获取链接: 获取文件的下载链接，并以 txt 附件发送。
-     - 示例: `ol ls 2` (如果2是文件)
+     - 示例: `ol ls` / `ol ls /movies`
+   - 进入子目录: `ol ls 1` (如果1是目录)
+   - 获取链接: `ol ls 2` (如果2是文件，以 txt 附件发送直链)
 
-▶️ `ol next` - 下一页
-▶️ `ol prev` - 上一页
-
-▶️ `ol quit`
-   - 返回到上级目录。
+▶️ `ol next` / `ol prev` - 下一页 / 上一页
+▶️ `ol quit` - 返回上级目录（搜索后可执行本指令回到原目录）
 
 ---
 文件操作指令
 ---
 📥 `ol download <路径|序号>`
-   - 直接下载: 将文件作为附件发送给您。
-     - 示例: `ol download 3` (下载列表中的3号文件)
-     - 示例: `ol download /docs/report.pdf`
+   - 直接下载文件并作为附件发送。
+     - 示例: `ol download 3` / `ol download /docs/report.pdf`
 
 🔍 `ol search <关键词> [路径]`
-   - 搜索文件。注意：搜索依赖服务器索引，可能不是最新的。
-     - 示例: `ol search "年度报告"`
+   - 搜索文件（依赖 OpenList 索引）。
+     - 示例: `ol search 年度报告`
 
-ℹ️ `ol info <路径>`
-   - 查看文件或目录的详细信息，不支持序号。
-     - 示例: `ol info /docs/report.pdf`
+ℹ️ `ol info <路径|序号>`
+   - 查看文件或目录的详细信息，支持列表序号。
+     - 示例: `ol info 1` / `ol info /docs/report.pdf`
 
 👁️ `ol preview <路径|序号>`
-   - 预览内容: 支持文本文件内容预览或压缩包目录查看。
-     - 示例: `ol preview 1`
-     - 示例: `ol preview /data/config.txt`
+   - 预览文本文件内容或查看压缩包目录。
+     - 示例: `ol preview 1` / `ol preview /data/config.txt`
 
-📂 `ol mkdir <名称|路径>`
-   - 新建文件夹: 在当前目录或指定路径创建。
-     - 示例: `ol mkdir new_folder`
+📂 `ol mkdir <名称|路径>` - 新建文件夹
+🗑️ `ol rm <路径|序号>` - 删除文件或文件夹（谨慎操作）
 
-🗑️ `ol rm <路径|序号>`
-   - 删除项目: 删除文件或文件夹（谨慎操作）。
-     - 示例: `ol rm 4`
-     - 示例: `ol rm /tmp/stale_file.txt`
+📤 `ol upload [目标路径] [闪传链接]`
+   - 支持**群聊文件、私聊离线文件、图片/视频、QQ 闪传多文件集**（保留子目录结构）转存。
+   - 方式一: 先发附件或闪传卡片，5 分钟内发 `ol upload` 或 `ol upload /目标目录`
+   - 方式二: 直接发 `ol upload /目标目录 https://qfile.qq.com/q/xxxx`
 
-📤 `ol upload [路径]`
-   - 先发送图片、视频或文件，再在 5 分钟内发送本指令上传最近附件。
-   - `ol upload`: 上传到当前目录。
-   - `ol upload /目标目录`: 上传到指定目录。
-   - `ol upload 子目录`: 上传到当前目录下的子目录。
+📦 `ol backup [/目标路径] [@群号|private:@QQ号]`
+   - 群聊中默认递归备份当前群文件与近期闪传；私聊中默认备份当前私聊文件与闪传。
+   - 示例: `ol backup` / `ol backup /群备份 @123456` / `ol backup retry`
 
-📦 `ol backup [/目标路径] [@群号]`
-   - 将指定群聊的所有文件递归备份到 Openlist。
-   - 示例: `ol backup /群备份 @123456`
-   - 重试失败项: `ol backup retry`
-   - 提示: 路径须以 `/` 开头，群号须以 `@` 开头。未指定路径时使用 `backup_default_path`。
-   - 权限: 当前群可直接操作；指定其他群时需要您是目标群群主或管理员。
-
-🔄 `ol autobackup <enable|disable|cancel> [@群号] [/路径]`
-   - 配置群文件自动备份（新上传文件自动同步）。
-   - 示例: `ol autobackup enable` (首次开启当前群备份到默认路径)
-   - 示例: `ol autobackup enable @123456 /backup` (指定群号和路径)
-   - 示例: `ol autobackup disable @123456` (禁用指定群的自动备份)
-   - 示例: `ol autobackup cancel @123456` (取消正在执行的首次全量备份)
-   - 提示: 已开启且目标目录不变时，`enable` 不会重复执行首次全量备份。
-   - 提示: 显式传入不同 `/路径` 会更新目标目录，并对新目标执行一次全量备份。
-   - 提示: 自动备份启用列表由本指令维护，发送 `ol autobackup show` 查看当前状态。
-   - 提示: `cancel` 只取消 `enable` 触发的首次全量备份，不会关闭后续自动备份。
-   - 提示: 禁用或取消时无需提供路径。路径须以 `/` 开头，群号须以 `@` 开头。
+🔄 `ol autobackup <show|enable|disable|cancel> [@群号|private:@QQ号] [/路径]`
+   - 配置群聊或私聊自动备份（支持群文件、私聊离线文件、QQ 闪传自动入盘）。
+   - 群聊开启: `ol autobackup enable` 或 `ol autobackup enable @123456 /backup`
+   - 私聊开启: 在私聊发 `ol autobackup enable` 或管理员发 `ol autobackup enable private:@987654 /backup`
+   - 取消首次全量备份: `ol autobackup cancel [@群号|private:@QQ号]`
 
 🚚 `ol restore <路径> [@群号]`
-   - 将 Openlist 路径中的文件恢复（发送）到目标群组或私聊。
-   - 示例: `ol restore /backup/group_123456` (恢复到当前会话)
-   - 示例: `ol restore /docs @987654` (恢复到指定群)
-   - 提示: 目标为群组时会尝试保持一级目录结构。
-   - 权限: 当前群可直接操作；指定其他群时需要您是目标群群主或管理员。
+   - 将 OpenList 路径中的文件恢复到目标群（保持一级目录结构）或当前私聊。
+   - 示例: `ol restore /backup/group_123456` / `ol restore /docs @987654`
 
 ---
 插件配置指令
 ---
-⚙️ `ol config setup` - 推荐新用户使用，启动交互式配置向导。
-⚙️ `ol config show` - 显示您当前的配置。
-⚙️ `ol config set <键> <值>` - 修改配置项。
-   - 示例: `ol config set openlist_url http://127.0.0.1:5244`
-   - 示例: `ol config set max_upload_size 100`
-⚙️ `ol config test` - 测试与服务器的连接。
-⚙️ `ol config clear_cache` - 清除文件列表缓存。
-"""
+⚙️ `ol config setup` - 查看快速配置向导
+⚙️ `ol config show` - 显示当前生效配置
+⚙️ `ol config set <键> <值>` - 修改配置项（全局共享模式下管理员执行会直接更新全局配置）
+⚙️ `ol config unset <键>` - 重置配置项 / 恢复继承全局配置
+⚙️ `ol config test` - 测试与 OpenList 服务器的连接
+⚙️ `ol config clear_cache` - 清除文件列表缓存"""
 
         if is_user_auth_mode:
-            help_text += f"""
+            help_text += """
 
 👤 当前模式: 用户独立认证
-   - 每位用户都需要使用 `ol config setup` 单独配置自己的 Openlist 账户信息。"""
-
+   - 每位用户可使用 `ol config setup` 单独配置个人 OpenList 账户，未修改项继承全局设置。"""
             if not self._validate_config(user_config):
-                help_text += f"""
+                help_text += """
 
 ⚠️ 操作提示
    您尚未完成配置，请发送 `ol config setup` 开始配置向导。"""
         else:
-            help_text += f"""
+            help_text += """
 
-🌐 当前模式: 全局共享
-   - 所有用户共享管理员预设的 Openlist 服务器连接，无需单独配置。"""
-
-        help_text += f"""
-
-💡 通用提示:
-1.  路径区分大小写，以 `/` 开头表示根目录。
-2.  `ls` 获取链接，`download` 直接发送文件。
-3.  管理员可在机器人后台的插件配置页面调整全局设置。"""
+🌐 当前模式: 全局共享（默认）
+   - 所有用户共享全局 OpenList 服务器连接；管理员可通过 WebUI 或 `ol config set` 直接修改全局设置。"""
 
         yield event.plain_result(help_text)

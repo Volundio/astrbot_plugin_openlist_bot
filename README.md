@@ -23,11 +23,11 @@
 * 📁 **智能导航** - 序号快速导航，支持进入文件夹、返回上级目录和分页浏览，并按会话隔离状态。
 * 📥 **直接下载** - 通过 OpenList API 获取真实下载地址，并使用 AstrBot `File` 组件发送文件。
 * 🔗 **链接获取** - 下载链接会以 txt 附件发送，避免长链接被平台自动转成图片。
-* 📤 **文件上传** - 先发送图片、视频或文件，再使用 `ol upload` 上传同会话最近 5 分钟内的附件消息。
+* 📤 **文件上传与闪传转存** - 支持发送图片、视频、群聊文件、私聊离线文件或 **QQ 闪传多文件卡片/链接**后使用 `ol upload` 转存（自动保留闪传子目录层级），也支持 `ol upload /目录 <闪传链接>` 直接转存。
 * 🔍 **文件搜索** - 支持在指定目录中搜索目标文件。
-* 📋 **文件信息** - 查看文件详细信息，并可附带下载链接 txt 附件。
-* 📦 **备份恢复** - 支持群文件递归备份、失败重试、跳过重复文件、同名冲突改名和恢复文件到群。
-* 🔄 **自动备份** - 支持群文件新增自动备份，首次开启或显式更换目标目录时会执行一次全量备份。
+* 📋 **文件信息** - 支持通过路径或列表序号查看文件详细信息，并可附带下载链接 txt 附件。
+* 📦 **群聊/私聊备份恢复** - 支持群聊文件、私聊文件与 QQ 闪传备份，具备失败重试、跳过重复文件、同名冲突改名和恢复文件到群（兼容跨容器部署）。
+* 🔄 **全场景自动备份** - 支持群聊与私聊文件/QQ 闪传新增自动备份，自动过滤机器人自身发出的文件并去重双事件。
 * 👁️ **内容预览** - 支持文本文件预览和压缩包内容查看。
 * ⚙️ **灵活设置** - 支持全局设置和用户独立设置两种模式。
 * 🧰 **传输调优** - 上传分块、超时、重试和诊断日志均可配置。
@@ -254,13 +254,16 @@ ol ls /movies/Inception.mkv
 ol download 2
 ol download /movies/Inception.mkv
 
-# 先发送图片、视频或文件，再上传到当前目录
+# 先发送图片、视频、群/私聊文件或 QQ 闪传卡片，再上传到当前目录
 ol upload
 
-# 先发送图片、视频或文件，再上传到指定目录
+# 先发送附件或 QQ 闪传卡片，再上传到指定目录
 ol upload /movies
 
-# 先发送图片、视频或文件，再上传到当前目录下的子目录
+# 一行命令直接转存 QQ 闪传分享链接（支持多文件与子目录）
+ol upload /movies https://qfile.qq.com/q/xxxx
+
+# 先发送附件，再上传到当前目录下的子目录
 ol upload clips
 ```
 
@@ -268,9 +271,8 @@ ol upload clips
 
 * `ol ls` 获取文件链接时，会将下载链接写入 txt 附件发送，避免长文本被平台转成图片。
 * `ol download` 会先通过 OpenList API 获取真实下载链接，再下载到本地临时文件并用 `File` 组件发送。
-* `ol upload` 使用同会话、同一发送者 5 分钟内最近一条附件消息；不依赖 QQ/OneBot 的引用回复解析。
-* 最近附件缓存只保存消息元数据和 URL，不保存文件内容；缓存最多保留 500 个会话条目，并忽略机器人自己发出的消息。
-* 上传使用平台提供的文件 URL 进行流式中转；群文件没有 URL 时会尝试通过 OneBot 群文件接口获取下载地址。
+* `ol upload` 使用同会话、同一发送者 5 分钟内最近一条附件/闪传消息，也支持直接在命令参数中附带 `qfile.qq.com` 闪传链接。
+* 支持 **群聊文件**（`get_group_file_url`）、**私聊文件**（`offline_file` 通知、`get_private_file_url`、`get_file`）以及 **OneBot QQ 闪传多文件转存**（`flashtransfer` 消息段、闪传 JSON 卡片、`qfile.qq.com` 链接，自动创建并保留闪传内部子目录结构）。
 * 用户上传的 URL 流式中转多次失败后，会改用本地临时文件备用上传：先完整下载到 `upload_temp`，校验大小后再上传；无论成功或失败，都会清理临时文件。
 * 浏览列表、分页和序号操作按会话隔离；同一用户在不同群聊或私聊中使用不会串用序号状态。
 
@@ -279,25 +281,26 @@ ol upload clips
 **Bash**
 
 ```
-# 手动备份群文件到 OpenList
-# 用法：ol backup [@群号] [/目标路径]
+# 手动备份（群聊默认备份当前群文件与近期闪传；私聊默认备份当前私聊文件与闪传）
+# 用法：ol backup [@群号|private:@QQ号] [/目标路径]
 ol backup @123456789 /backup/group_files
 ol backup /my_backup
 ol backup
 
-# 只重试上次备份失败的文件
+# 只重试上次备份失败的文件（兼容群聊、私聊与闪传失败项）
 ol backup retry
 
-# 自动备份设置
+# 自动备份设置（支持群聊与私聊）
 ol autobackup
 ol autobackup enable
 ol autobackup enable @123456789 /backup/group_{group_id}
+ol autobackup enable private:@987654321 /backup/private_{user_id}
 ol autobackup disable
 ol autobackup disable @123456789
 ol autobackup cancel
 ol autobackup cancel @123456789
 
-# 从 OpenList 恢复文件到群
+# 从 OpenList 恢复文件到群或私聊
 # 用法：ol restore /来源路径 [@目标群号]
 ol restore /backup/important_file @123456789
 ol restore /backup/folder
@@ -337,8 +340,8 @@ ol restore /backup/folder
 ### 📂 文件存储结构
 
 ```
-data/plugins_data/openlist/
-├── global_config.json          # 全局设置和自动备份运行状态文件
+data/plugin_data/openlist/
+├── global_config.json          # 全局覆盖配置和自动备份运行状态文件
 ├── users/                      # 用户设置目录
 │   ├── user1.json              # 用户 1 的设置
 │   ├── user2.json              # 用户 2 的设置
@@ -352,7 +355,7 @@ data/plugins_data/openlist/
 ├── links/                      # 下载链接 txt 临时目录
 ├── temp_preview/               # 文件预览临时目录
 ├── upload_temp/                # 用户上传备用上传临时目录
-├── backup_temp/                # 群文件备用上传临时目录
+├── backup_temp/                # 群/私聊/闪传备用上传临时目录
 └── backup_retry/               # 备份失败重试清单
 ```
 
@@ -360,23 +363,25 @@ data/plugins_data/openlist/
 
 ```
 astrbot_plugin_openlist_bot/
-├── main.py                     # 插件入口、命令注册和通用工具
+├── main.py                     # 插件入口、命令注册、生命周期与通用工具
+├── requirements.txt            # 第三方依赖声明
 ├── lib/
-│   ├── cache.py                # 文件列表缓存
-│   ├── client.py               # OpenList API 客户端
-│   └── config.py               # 配置默认值和校验规则
+│   ├── cache.py                # 文件列表缓存（按认证作用域共享与精确失效）
+│   ├── client.py               # OpenList API 客户端（Token 缓存与流式传输）
+│   ├── config.py               # 配置默认值、显式覆盖与校验规则
+│   └── onebot_files.py         # OneBot 11 群文件、私聊离线文件与 QQ 闪传解析器
 └── services/
     ├── base.py                 # 服务基类与共享临时文件工具
-    ├── backup.py               # 备份与自动备份任务编排
-    ├── backup_scanner.py       # 群文件扫描、过滤和去重
+    ├── backup.py               # 群聊/私聊/闪传备份与自动备份任务编排
+    ├── backup_scanner.py       # 群文件、私聊历史和闪传扫描过滤与去重
     ├── backup_target.py        # 备份目标路径、同名处理和已存在判断
-    ├── backup_uploader.py      # 群文件上传重试和备用上传
-    ├── browse.py               # 浏览、搜索、删除、新建
-    ├── config_command.py       # 配置命令
+    ├── backup_uploader.py      # 备份文件上传重试和备用上传
+    ├── browse.py               # 浏览、搜索、信息、删除、新建
+    ├── config_command.py       # 配置命令（支持全局模式直改与个人覆盖重置）
     ├── download.py             # 下载与链接发送
-    ├── preview.py              # 文件预览
-    ├── restore.py              # 恢复文件
-    ├── upload.py               # 最近附件上传
+    ├── preview.py              # 流式文本与压缩包预览
+    ├── restore.py              # 恢复文件（支持跨容器兼容降级）
+    ├── upload.py               # 最近附件、私聊文件与闪传多文件上传
     └── help.py                 # 帮助信息
 ```
 
